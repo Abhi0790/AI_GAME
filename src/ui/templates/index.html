@@ -1,10 +1,423 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Diplomacy Game UI</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Territory Game — AI Dashboard</title>
+    <style>
+        :root {
+            --bg: #0f1117;
+            --surface: #1a1d27;
+            --border: #2a2d3a;
+            --text: #e0e0e0;
+            --muted: #888;
+            --red: #e74c3c;
+            --blue: #3498db;
+            --green: #2ecc71;
+            --gold: #f1c40f;
+            --accent: #9b59b6;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); }
+
+        /* Layout */
+        .header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; }
+        .header h1 { font-size: 1.3rem; }
+        .header .controls { display: flex; gap: 10px; align-items: center; }
+        .header button { padding: 8px 18px; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.85rem; }
+        .btn-primary { background: var(--accent); color: #fff; }
+        .btn-primary:hover { opacity: 0.9; }
+        .btn-secondary { background: var(--border); color: var(--text); }
+        .btn-secondary:hover { background: #3a3d4a; }
+        .btn-danger { background: var(--red); color: #fff; }
+
+        .main { display: grid; grid-template-columns: 1fr 350px; grid-template-rows: auto 1fr; gap: 0; height: calc(100vh - 52px); }
+
+        /* Board */
+        .board-panel { grid-column: 1; grid-row: 1 / 3; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        .board-panel svg { max-width: 700px; width: 100%; }
+        .scoreboard { display: flex; gap: 16px; margin-top: 16px; flex-wrap: wrap; justify-content: center; }
+        .score-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 18px; text-align: center; min-width: 100px; }
+        .score-card .name { font-weight: 700; font-size: 0.9rem; }
+        .score-card .count { font-size: 1.6rem; font-weight: 700; margin-top: 4px; }
+
+        /* Right sidebar */
+        .sidebar { grid-column: 2; grid-row: 1 / 3; border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
+        .tabs { display: flex; border-bottom: 1px solid var(--border); }
+        .tab { flex: 1; padding: 10px; text-align: center; cursor: pointer; font-size: 0.8rem; font-weight: 600; color: var(--muted); background: var(--surface); border: none; }
+        .tab.active { color: var(--accent); border-bottom: 2px solid var(--accent); }
+        .tab-content { flex: 1; overflow-y: auto; padding: 14px; font-size: 0.82rem; }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+
+        /* Trust matrix */
+        .trust-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+        .trust-table th, .trust-table td { padding: 6px 8px; border: 1px solid var(--border); text-align: center; }
+        .trust-table th { background: var(--surface); }
+
+        /* Log entries */
+        .log-entry { padding: 6px 0; border-bottom: 1px solid var(--border); line-height: 1.4; }
+        .log-entry .turn-label { font-weight: 700; color: var(--accent); }
+        .log-entry.betrayal { color: var(--red); font-weight: 600; }
+        .log-entry.commitment { color: var(--green); }
+        .log-entry.gossip { color: var(--gold); font-style: italic; }
+
+        /* Traces */
+        .trace-block { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-bottom: 10px; }
+        .trace-block h4 { margin-bottom: 6px; }
+        .trace-block p { font-size: 0.78rem; color: var(--muted); line-height: 1.5; }
+        .trace-block .broke { color: var(--red); font-weight: 600; }
+
+        /* Turn indicator */
+        .turn-indicator { font-size: 1rem; font-weight: 700; color: var(--accent); margin-right: 12px; }
+        .status-badge { font-size: 0.75rem; padding: 3px 10px; border-radius: 10px; }
+        .status-badge.playing { background: var(--green); color: #000; }
+        .status-badge.finished { background: var(--muted); color: #000; }
+
+        /* Node colours for SVG */
+        .node-Red { fill: #e74c3c; }
+        .node-Blue { fill: #3498db; }
+        .node-Green { fill: #2ecc71; }
+        .node-Gold { fill: #f1c40f; }
+        .node-none { fill: #555; }
+        .node-circle { stroke: #fff; stroke-width: 2; cursor: pointer; }
+        .node-label { fill: #fff; font-size: 11px; font-weight: 700; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+        .node-sc { fill: #fff; font-size: 8px; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+        .edge-line { stroke: #333; stroke-width: 1.5; }
+        .move-arrow { stroke-width: 2.5; fill: none; marker-end: url(#arrowhead); }
+        .move-success { stroke: #2ecc71; }
+        .move-bounce { stroke: #e74c3c; stroke-dasharray: 6,4; }
+        .support-arrow { stroke: #3498db; stroke-width: 1.5; stroke-dasharray: 4,3; fill: none; marker-end: url(#arrowhead-blue); }
+
+        .auto-label { font-size: 0.8rem; color: var(--muted); }
+    </style>
 </head>
 <body>
-    <h1>{{ message }}</h1>
-    <p>The UI is currently under construction. Please use the headless mode for testing.</p>
+
+<div class="header">
+    <h1>🗺️ Territory Game — AI Dashboard</h1>
+    <div class="controls">
+        <span class="turn-indicator" id="turnLabel">No Game</span>
+        <span class="status-badge" id="statusBadge">—</span>
+        <button class="btn-primary" id="btnNew" onclick="newGame()">New Game</button>
+        <button class="btn-secondary" id="btnStep" onclick="stepGame()" disabled>Step →</button>
+        <label class="auto-label"><input type="checkbox" id="autoPlay"> Auto</label>
+        <button class="btn-secondary" id="btnRunAll" onclick="runAll()" disabled>Run All</button>
+    </div>
+</div>
+
+<div class="main">
+    <!-- Board panel -->
+    <div class="board-panel">
+        <svg id="boardSvg" viewBox="-60 -60 620 620" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="#2ecc71"/>
+                </marker>
+                <marker id="arrowhead-red" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="#e74c3c"/>
+                </marker>
+                <marker id="arrowhead-blue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+                    <polygon points="0 0, 8 3, 0 6" fill="#3498db"/>
+                </marker>
+            </defs>
+            <g id="edges"></g>
+            <g id="arrows"></g>
+            <g id="nodes"></g>
+        </svg>
+        <div class="scoreboard" id="scoreboard"></div>
+    </div>
+
+    <!-- Sidebar -->
+    <div class="sidebar">
+        <div class="tabs">
+            <button class="tab active" onclick="switchTab('log')">Log</button>
+            <button class="tab" onclick="switchTab('trust')">Trust</button>
+            <button class="tab" onclick="switchTab('traces')">Traces</button>
+        </div>
+        <div class="tab-content">
+            <div id="tab-log" class="tab-panel active">
+                <div id="logEntries"><p style="color:var(--muted)">Start a new game to see events here.</p></div>
+            </div>
+            <div id="tab-trust" class="tab-panel">
+                <div id="trustMatrix"><p style="color:var(--muted)">Trust data appears after the first turn.</p></div>
+            </div>
+            <div id="tab-traces" class="tab-panel">
+                <div id="traceEntries"><p style="color:var(--muted)">Decision traces appear after each turn.</p></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// ── Board layout ────────────────────────────────────────────────────────
+const POSITIONS = {
+    R1: {x:100, y:50},  R2: {x:200, y:100}, R3: {x:50, y:150},
+    B1: {x:400, y:50},  B2: {x:450, y:150}, B3: {x:300, y:100},
+    G1: {x:400, y:450}, G2: {x:450, y:350}, G3: {x:350, y:250},
+    Y1: {x:100, y:450}, Y2: {x:50, y:350},  Y3: {x:150, y:250},
+    N1: {x:250, y:30},  N2: {x:250, y:470}
+};
+const ADJACENCY = {
+    R1:["R2","R3","N1"], R2:["R1","R3","B3"], R3:["R1","R2","Y2"],
+    B1:["B2","B3","N1"], B2:["B1","B3","G3"], B3:["B1","B2","R2"],
+    G1:["G2","G3","N2"], G2:["G1","G3","Y3"], G3:["G1","G2","B2"],
+    Y1:["Y2","Y3","N2"], Y2:["Y1","Y3","R3"], Y3:["Y1","Y2","G2"],
+    N1:["R1","B1","N2"], N2:["G1","Y1","N1"]
+};
+const SUPPLY_CENTERS = new Set(["R1","B1","G1","Y1","N1","N2"]);
+const PLAYER_COLORS = {Red:"#e74c3c", Blue:"#3498db", Green:"#2ecc71", Gold:"#f1c40f"};
+
+let gameId = null;
+let autoTimer = null;
+
+// ── Draw static board edges ─────────────────────────────────────────────
+function drawEdges() {
+    const g = document.getElementById('edges');
+    g.innerHTML = '';
+    const drawn = new Set();
+    for (const [node, neighbors] of Object.entries(ADJACENCY)) {
+        for (const n of neighbors) {
+            const key = [node, n].sort().join('-');
+            if (drawn.has(key)) continue;
+            drawn.add(key);
+            const line = document.createElementNS("http://www.w3.org/2000/svg","line");
+            line.setAttribute("x1", POSITIONS[node].x);
+            line.setAttribute("y1", POSITIONS[node].y);
+            line.setAttribute("x2", POSITIONS[n].x);
+            line.setAttribute("y2", POSITIONS[n].y);
+            line.setAttribute("class", "edge-line");
+            g.appendChild(line);
+        }
+    }
+}
+
+// ── Draw nodes with ownership colours ───────────────────────────────────
+function drawNodes(state) {
+    const g = document.getElementById('nodes');
+    g.innerHTML = '';
+    const owners = state.territory_owners || {};
+    const units = state.units || [];
+    const unitMap = {};
+    for (const u of units) unitMap[u.territory] = u.player;
+
+    for (const [name, pos] of Object.entries(POSITIONS)) {
+        const owner = owners[name] || null;
+        const color = owner ? (PLAYER_COLORS[owner] || "#555") : "#555";
+        const r = SUPPLY_CENTERS.has(name) ? 26 : 22;
+
+        const circle = document.createElementNS("http://www.w3.org/2000/svg","circle");
+        circle.setAttribute("cx", pos.x);
+        circle.setAttribute("cy", pos.y);
+        circle.setAttribute("r", r);
+        circle.setAttribute("class", "node-circle");
+        circle.style.fill = color;
+        g.appendChild(circle);
+
+        // Label
+        const label = document.createElementNS("http://www.w3.org/2000/svg","text");
+        label.setAttribute("x", pos.x);
+        label.setAttribute("y", pos.y - (unitMap[name] ? 5 : 0));
+        label.setAttribute("class", "node-label");
+        label.textContent = name;
+        g.appendChild(label);
+
+        // Supply center star
+        if (SUPPLY_CENTERS.has(name)) {
+            const star = document.createElementNS("http://www.w3.org/2000/svg","text");
+            star.setAttribute("x", pos.x + r - 4);
+            star.setAttribute("y", pos.y - r + 6);
+            star.setAttribute("class", "node-sc");
+            star.textContent = "★";
+            g.appendChild(star);
+        }
+
+        // Unit marker
+        if (unitMap[name]) {
+            const ut = document.createElementNS("http://www.w3.org/2000/svg","text");
+            ut.setAttribute("x", pos.x);
+            ut.setAttribute("y", pos.y + 10);
+            ut.style.fill = "#fff";
+            ut.style.fontSize = "9px";
+            ut.style.fontWeight = "700";
+            ut.style.textAnchor = "middle";
+            ut.textContent = "⚔ " + unitMap[name][0];
+            g.appendChild(ut);
+        }
+    }
+}
+
+// ── Draw move/support arrows ────────────────────────────────────────────
+function drawArrows(step) {
+    const g = document.getElementById('arrows');
+    g.innerHTML = '';
+    if (!step) return;
+    const logEvents = step.log || [];
+
+    for (const o of (step.orders || [])) {
+        if (o.order_type === "Move" && o.target && POSITIONS[o.unit_territory] && POSITIONS[o.target]) {
+            const success = logEvents.some(e => e.includes("Move succeeds: " + o.unit_territory));
+            const line = document.createElementNS("http://www.w3.org/2000/svg","line");
+            const src = POSITIONS[o.unit_territory];
+            const dst = POSITIONS[o.target];
+            // Offset slightly so arrows don't overlap edges
+            const dx = dst.x - src.x, dy = dst.y - src.y;
+            const len = Math.sqrt(dx*dx + dy*dy) || 1;
+            const shrink = 28;
+            line.setAttribute("x1", src.x + dx/len * shrink);
+            line.setAttribute("y1", src.y + dy/len * shrink);
+            line.setAttribute("x2", dst.x - dx/len * shrink);
+            line.setAttribute("y2", dst.y - dy/len * shrink);
+            line.setAttribute("class", "move-arrow " + (success ? "move-success" : "move-bounce"));
+            if (!success) line.setAttribute("marker-end", "url(#arrowhead-red)");
+            g.appendChild(line);
+        }
+        if (o.order_type === "Support" && o.target && POSITIONS[o.unit_territory] && POSITIONS[o.target]) {
+            const line = document.createElementNS("http://www.w3.org/2000/svg","line");
+            const src = POSITIONS[o.unit_territory];
+            const dst = POSITIONS[o.target];
+            const dx = dst.x - src.x, dy = dst.y - src.y;
+            const len = Math.sqrt(dx*dx + dy*dy) || 1;
+            const shrink = 28;
+            line.setAttribute("x1", src.x + dx/len * shrink);
+            line.setAttribute("y1", src.y + dy/len * shrink);
+            line.setAttribute("x2", dst.x - dx/len * shrink);
+            line.setAttribute("y2", dst.y - dy/len * shrink);
+            line.setAttribute("class", "support-arrow");
+            g.appendChild(line);
+        }
+    }
+}
+
+// ── Scoreboard ──────────────────────────────────────────────────────────
+function updateScoreboard(state) {
+    const sb = document.getElementById('scoreboard');
+    const counts = {Red:0, Blue:0, Green:0, Gold:0};
+    for (const [t, owner] of Object.entries(state.supply_centers || {})) {
+        if (owner) counts[owner] = (counts[owner]||0) + 1;
+    }
+    sb.innerHTML = '';
+    for (const [p, c] of Object.entries(counts)) {
+        const card = document.createElement('div');
+        card.className = 'score-card';
+        card.innerHTML = `<div class="name" style="color:${PLAYER_COLORS[p]}">${p}</div><div class="count">${c}</div><div style="font-size:0.7rem;color:var(--muted)">centres</div>`;
+        sb.appendChild(card);
+    }
+}
+
+// ── Log panel ───────────────────────────────────────────────────────────
+const logEl = document.getElementById('logEntries');
+function appendLog(turn, step) {
+    if (turn === 0) { logEl.innerHTML = ''; }
+    // Commitments
+    for (const o of (step.outcomes || [])) {
+        if (!o.kept) {
+            const d = document.createElement('div');
+            d.className = 'log-entry betrayal';
+            d.innerHTML = `<span class="turn-label">T${turn}</span> ⚠ BETRAYAL: ${o.commitment_type} between ${o.players.join(', ')} broken by ${o.broken_by.join(', ')}`;
+            logEl.prepend(d);
+        }
+    }
+    // Log events
+    for (const e of (step.log || [])) {
+        const d = document.createElement('div');
+        d.className = 'log-entry';
+        if (e.includes('GOSSIP') || e.includes('broadcasts')) d.className += ' gossip';
+        if (e.includes('Commitment created')) d.className += ' commitment';
+        d.innerHTML = `<span class="turn-label">T${turn}</span> ${e}`;
+        logEl.prepend(d);
+    }
+}
+
+// ── Traces panel ────────────────────────────────────────────────────────
+const tracesEl = document.getElementById('traceEntries');
+function updateTraces(turn, step) {
+    if (turn === 1) tracesEl.innerHTML = '';
+    for (const [player, trace] of Object.entries(step.traces || {})) {
+        if (!trace) continue;
+        const block = document.createElement('div');
+        block.className = 'trace-block';
+        const brokeHtml = trace.commitment_broken ? '<span class="broke"> [BROKE COMMITMENT]</span>' : '';
+        block.innerHTML = `<h4 style="color:${PLAYER_COLORS[player] || 'var(--text)'}">Turn ${turn} — ${player}${brokeHtml}</h4>
+            <p>${trace.explanation}</p>
+            <p>EV: ${trace.expected_value.toFixed(2)} | Penalty: ${trace.penalty.toFixed(2)}</p>`;
+        tracesEl.prepend(block);
+    }
+}
+
+// ── Tab switching ───────────────────────────────────────────────────────
+function switchTab(name) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(t => t.classList.remove('active'));
+    event.target.classList.add('active');
+    document.getElementById('tab-' + name).classList.add('active');
+}
+
+// ── API calls ───────────────────────────────────────────────────────────
+async function newGame() {
+    const seed = Math.floor(Math.random() * 1000);
+    const res = await fetch(`/api/game/new?seed=${seed}`, {method:'POST'});
+    const data = await res.json();
+    gameId = data.game_id;
+    document.getElementById('btnStep').disabled = false;
+    document.getElementById('btnRunAll').disabled = false;
+    document.getElementById('turnLabel').textContent = 'Turn 1';
+    document.getElementById('statusBadge').textContent = 'Playing';
+    document.getElementById('statusBadge').className = 'status-badge playing';
+    logEl.innerHTML = '';
+    tracesEl.innerHTML = '';
+    drawNodes(data.state);
+    drawArrows(null);
+    updateScoreboard(data.state);
+}
+
+async function stepGame() {
+    if (!gameId) return;
+    const res = await fetch(`/api/game/${gameId}/step`, {method:'POST'});
+    const data = await res.json();
+    if (data.finished) {
+        document.getElementById('statusBadge').textContent = 'Finished';
+        document.getElementById('statusBadge').className = 'status-badge finished';
+        document.getElementById('btnStep').disabled = true;
+        document.getElementById('btnRunAll').disabled = true;
+        if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+    }
+    document.getElementById('turnLabel').textContent = 'Turn ' + (data.turn || '?');
+    drawNodes(data.state);
+    drawArrows(data.step);
+    updateScoreboard(data.state);
+    appendLog(data.turn, data.step);
+    updateTraces(data.turn, data.step);
+    return data.finished;
+}
+
+async function runAll() {
+    if (!gameId) return;
+    document.getElementById('btnRunAll').disabled = true;
+    for (let i = 0; i < 12; i++) {
+        const finished = await stepGame();
+        if (finished) break;
+        await new Promise(r => setTimeout(r, 400));
+    }
+}
+
+// ── Auto-play toggle ────────────────────────────────────────────────────
+document.getElementById('autoPlay').addEventListener('change', function() {
+    if (this.checked) {
+        autoTimer = setInterval(async () => {
+            const done = await stepGame();
+            if (done) { clearInterval(autoTimer); autoTimer = null; document.getElementById('autoPlay').checked = false; }
+        }, 1000);
+    } else {
+        if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+    }
+});
+
+// ── Init ────────────────────────────────────────────────────────────────
+drawEdges();
+// Draw empty board
+drawNodes({territory_owners:{}, units:[]});
+updateScoreboard({supply_centers:{}});
+</script>
 </body>
 </html>
