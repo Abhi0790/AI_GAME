@@ -13,7 +13,7 @@ class HumanAgent:
     def __init__(self, player: Player):
         self.player = player
         
-    def update_beliefs_from_outcomes(self, state: GameState, outcomes: list):
+    def update_beliefs_from_outcomes(self, prev_state: GameState, new_state: GameState, outcomes: list):
         pass # Human updates their own beliefs
         
     def receive_gossip(self, msg: Message):

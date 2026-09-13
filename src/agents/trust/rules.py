@@ -1,17 +1,6 @@
 from typing import List, Dict, Any
-from src.common.schemas import Player, CommitmentType
-from src.engine.adjudicator import CommitmentOutcome
-from src.agents.trust.model import TrustModel
-
-class TrustTrace:
-    def __init__(self, rule_name: str, facts: str, old_alpha: float, old_beta: float, new_alpha: float, new_beta: float, explanation: str):
-        self.rule_name = rule_name
-        self.facts = facts
-        self.old_alpha = old_alpha
-        self.old_beta = old_beta
-        self.new_alpha = new_alpha
-        self.new_beta = new_beta
-        self.explanation = explanation
+from src.common.schemas import Player, CommitmentType, CommitmentOutcome, TrustTrace
+from src.agents.trust.model import TrustModel, break_weight, LAMBDA_INCENTIVE
 
 class TrustRule:
     def evaluate(self, model: TrustModel, facts: Dict[str, Any]) -> List[TrustTrace]:
@@ -27,24 +16,24 @@ class OutcomeRule(TrustRule):
         incentive = facts.get('incentive_to_defect', 0.0)
         c_type = outcome.commitment.commitment_type
         
+        # The owner's own record is kept too: it is public evidence, and it is
+        # what the planner prices its own betrayals against.
         for p in outcome.commitment.players:
-            if p == model.owner:
-                continue
-                
             record = model.get_record(p, c_type)
             old_a, old_b = record.alpha, record.beta
             
             if p in outcome.broken_by:
+                w = break_weight(incentive)
                 if incentive > 0.5:
                     rule_name = "R2: Profitable Betrayal"
-                    discount = 0.5
-                    explanation = f"Penalty reduced because expected gain was {incentive}"
+                    explanation = (f"w = 1 - {LAMBDA_INCENTIVE}x{incentive:.2f} = {w:.2f}: "
+                                   f"penalty reduced, the break paid for itself")
                 else:
                     rule_name = "R1: Gratuitous Betrayal"
-                    discount = 1.0
-                    explanation = "Full penalty applied because betrayal had little strategic gain"
-                    
-                record.update(kept=False, discount=discount)
+                    explanation = (f"w = 1 - {LAMBDA_INCENTIVE}x{incentive:.2f} = {w:.2f}: "
+                                   f"near-full penalty, the break gained little")
+
+                record.update(kept=False, discount=w)
                 traces.append(TrustTrace(rule_name, f"{p} broke {c_type}", old_a, old_b, record.alpha, record.beta, explanation))
             else:
                 rule_name = "R0: Kept Promise"

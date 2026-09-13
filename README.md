@@ -4,9 +4,9 @@ A 4-player territory game where software agents form alliances through a formal 
 
 ## Architecture
 
-* **Engine:** Headless adjudicator that processes simultaneous turns, verifies commitments, and updates the board map (14 nodes, 6 supply centers).
+* **Engine:** Headless adjudicator that processes simultaneous turns, verifies commitments, and updates the board map (12 territories, 10 supply centres, 2 units per player). A game ends at turn 12 or the moment someone holds 5 centres.
 * **Trust & Belief Model:** Uses Beta distributions to track trustworthiness. Explains changes using a forward-chaining rule base (R0–R3).
-* **Planner:** Uses expectiminimax depth-1 search over possible order combinations, factoring in reputation cost.
+* **Planner:** Expectiminimax depth-1 search over order combinations, pricing every broken promise at `Vcoop(partner) x deltaP(keeps) x (turns left / 12)`. No betrayal flag exists: late in the game the horizon term shrinks, and mid-game `Vcoop` collapses once the partner stops being useful.
 * **Opponent Model:** Tracks historical move patterns per opponent, estimates persona types, and feeds weighted probability distributions into the planner's sampling.
 * **Negotiation:** Closed structured grammar — Alliance, DMZ, Support proposals, and Threat messages.
 * **Evaluation:** Quantitative metrics (supply centre control, betrayal rates, alliance durations, win rates) with analysis reports and JSON export.
@@ -95,17 +95,18 @@ Test coverage includes:
 ├── src/
 │   ├── common/schemas.py          # Pydantic models (Player, Order, GameState, etc.)
 │   ├── engine/
-│   │   ├── board.py               # 14-territory map & adjacency
+│   │   ├── board.py               # 12-territory map, 10 centres, adjacency
+│   │   ├── orders.py              # Legal order enumeration
 │   │   ├── adjudicator.py         # Simultaneous move resolution
-│   │   ├── runner.py              # Game loop with gossip broadcasting
+│   │   ├── runner.py              # step() — the one turn loop, + gossip
 │   │   └── replay.py              # Save/load game replays
 │   ├── agents/
 │   │   ├── agent.py               # Agent class with 4 personas
 │   │   ├── trust/model.py         # Beta-distribution trust tracker
 │   │   ├── trust/rules.py         # Forward-chaining rule engine (R0–R3)
 │   │   ├── planner/planner.py     # Expectiminimax with reputation cost
-│   │   ├── planner/order_generator.py
 │   │   ├── negotiation/strategy.py # Alliance/DMZ/Support/Threat proposals
+│   │   ├── negotiation/personas.py # The four personas (parameters, not code)
 │   │   └── opponent_model/opponent_model.py
 │   ├── evaluation/
 │   │   ├── metrics.py             # Quantitative game metrics

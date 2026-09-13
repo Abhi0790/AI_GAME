@@ -3,7 +3,7 @@ import uuid
 
 from src.common.schemas import (
     GameState, Message, MessageType, Player, CommitmentType,
-    Commitment, Order,
+    Commitment, Order, message_to_commitment,
 )
 from src.agents.planner.planner import Planner, evaluate_state
 from src.agents.trust.model import TrustModel
@@ -183,17 +183,3 @@ class NegotiationStrategy:
             message_type=MessageType.REJECT,
             reference_id=msg.id,
         )
-
-
-def message_to_commitment(
-    msg: Message, accepted_by: Player, current_turn: int
-) -> Commitment:
-    return Commitment(
-        id=msg.id,
-        commitment_type=msg.commitment_type,
-        players=[msg.sender, accepted_by],
-        valid_until_turn=current_turn + (msg.turns if msg.turns else 1),
-        target_territory=msg.target_territory,
-        supported_from=msg.supported_from,
-        dmz_territories=msg.dmz_territories,
-    )

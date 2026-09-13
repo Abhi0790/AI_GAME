@@ -16,7 +16,7 @@ from src.common.schemas import (
     Player, GameState, Order, OrderType, Commitment, CommitmentType
 )
 from src.engine.board import get_adjacent, get_all_territories
-from src.agents.planner.order_generator import generate_all_order_sets
+from src.engine.orders import generate_all_order_sets
 
 
 class OpponentProfile:
