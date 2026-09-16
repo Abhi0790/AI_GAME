@@ -1,0 +1,24 @@
+# Build context hygiene: everything here is either rebuilt inside the image,
+# irrelevant to it, or large enough to slow every build down.
+.git
+.gitignore
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+
+web/node_modules/
+web/dist/
+
+replays/
+data/
+figures/
+experiments/
+
+*.md
+!README.md
+*.pptx
+Dockerfile
+.dockerignore
+docker-compose.yml

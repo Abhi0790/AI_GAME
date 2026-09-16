@@ -1,0 +1,30 @@
+# The four images from the one Dockerfile.
+#
+#   docker compose up web            dashboard on http://localhost:8000
+#   docker compose run --rm sim      one headless game
+#   docker compose run --rm test     the test suite
+#   docker compose run --rm report   figures and the sweep -> ./figures, ./data
+
+services:
+  web:
+    build: { context: ., target: web }
+    image: territory-web
+    ports: ["8000:8000"]
+
+  sim:
+    build: { context: ., target: sim }
+    image: territory-sim
+    profiles: ["tools"]
+
+  test:
+    build: { context: ., target: test }
+    image: territory-test
+    profiles: ["tools"]
+
+  report:
+    build: { context: ., target: report }
+    image: territory-report
+    profiles: ["tools"]
+    volumes:
+      - ./figures:/app/figures
+      - ./data:/app/data

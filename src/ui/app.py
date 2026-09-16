@@ -15,10 +15,10 @@ import uuid
 import random
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from fastapi.templating import Jinja2Templates
 
 from src.common.schemas import (
     Player, Order, OrderType, MessageType, describe_message, exchange_leg_due,
@@ -35,9 +35,17 @@ from src.evaluation.metrics import brier_score, reliability_bins
 
 
 app = FastAPI(title="Territory Game Dashboard")
-templates = Jinja2Templates(
-    directory=os.path.join(os.path.dirname(__file__), "templates")
-)
+
+# The dashboard is a React app built by Vite into web/dist. In the container
+# those files sit next to this module; in a source checkout they are two
+# levels up. Either way FastAPI serves them, so the page and the API share an
+# origin and no CORS or proxy configuration is needed in production.
+_HERE = os.path.dirname(__file__)
+_DIST_CANDIDATES = [
+    os.path.join(_HERE, "dist"),
+    os.path.abspath(os.path.join(_HERE, "..", "..", "web", "dist")),
+]
+DIST = next((d for d in _DIST_CANDIDATES if os.path.isdir(d)), None)
 
 # ── In-memory game store ────────────────────────────────────────────────
 _games: Dict[str, dict] = {}
@@ -207,9 +215,16 @@ def _game_summary(g) -> dict:
 
 # ── Routes ──────────────────────────────────────────────────────────────
 
-@app.get("/", response_class=HTMLResponse)
-async def read_root(request: Request):
-    return templates.TemplateResponse(request=request, name="index.html")
+@app.get("/", include_in_schema=False)
+async def read_root():
+    if DIST is None:
+        return PlainTextResponse(
+            "The dashboard has not been built.\n\n"
+            "    npm --prefix web install && npm --prefix web run build\n\n"
+            "The API is up regardless: try /api/board.",
+            status_code=503,
+        )
+    return FileResponse(os.path.join(DIST, "index.html"))
 
 
 @app.get("/api/board")
@@ -550,6 +565,12 @@ async def save(game_id: str):
     runner = g["runner"]
     path = save_replay(runner.history, runner.state)
     return {"path": path}
+
+
+# Mounted last so it cannot shadow an /api route.
+if DIST is not None:
+    app.mount("/assets", StaticFiles(directory=os.path.join(DIST, "assets")),
+              name="assets")
 
 
 if __name__ == "__main__":

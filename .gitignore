@@ -13,3 +13,7 @@ figures/
 # Only README.md is tracked. Everything else written in markdown stays local.
 *.md
 !README.md
+
+# React build output and dependencies — rebuilt by `npm run build`.
+web/node_modules/
+web/dist/
