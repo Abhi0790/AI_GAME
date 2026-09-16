@@ -367,3 +367,157 @@ class TestExchanges:
         deal = message_to_commitment(offer, B, runner.state.turn)
         v_none, v_kept, v_broken = ns.deal_totals(runner.state, deal, B, [])
         assert v_kept >= v_none >= v_broken
+
+
+# ── Evidence tiers: who learns what (R5) ─────────────────────────────────
+
+class TestEvidenceTiers:
+    """An agent's reputation record and its per-pair record have to be built
+    from *different* evidence, or the pair layer cannot ever disagree with
+    the reputation and is dead weight.
+    """
+
+    def _outcome(self, players, broken_by, private=False):
+        from src.common.schemas import CommitmentOutcome
+        c = Commitment(id="c", commitment_type=CommitmentType.ALLIANCE,
+                       players=list(players), valid_until_turn=6, private=private)
+        return CommitmentOutcome(commitment=c, kept=not broken_by,
+                                 broken_by=list(broken_by))
+
+    def _agent(self):
+        from src.agents.agent import Agent as _A
+        return _A(R, "Honest")
+
+    def _state(self):
+        return board((R, "R1"), (B, "B1"), (G, "G1"), (Y, "Y1"))
+
+    def test_a_public_break_between_others_is_seen(self):
+        a = self._agent()
+        before = a.trust_model.get_reliability(B, CommitmentType.ALLIANCE)
+        s = self._state()
+        a.update_beliefs_from_outcomes(s, s, [self._outcome([B, G], [B])])
+        assert a.trust_model.get_reliability(B, CommitmentType.ALLIANCE) < before
+
+    def test_a_private_break_between_others_is_invisible(self):
+        """This is what leaves gossip a job, and lying a cover."""
+        a = self._agent()
+        before = a.trust_model.get_reliability(B, CommitmentType.ALLIANCE)
+        s = self._state()
+        a.update_beliefs_from_outcomes(s, s, [self._outcome([B, G], [B], private=True)])
+        assert a.trust_model.get_reliability(B, CommitmentType.ALLIANCE) == before
+
+    def test_watching_others_does_not_touch_the_pair_record(self):
+        """Seeing Blue betray Green says nothing about how Blue treats me."""
+        a = self._agent()
+        s = self._state()
+        before = a.trust_model.get_pair_record(
+            B, R, CommitmentType.ALLIANCE).get_expected_value()
+        a.update_beliefs_from_outcomes(s, s, [self._outcome([B, G], [B])])
+        after = a.trust_model.get_pair_record(
+            B, R, CommitmentType.ALLIANCE).get_expected_value()
+        assert after == before
+
+    def test_reputation_and_relationship_can_now_disagree(self):
+        """The property the whole per-pair layer exists for: Blue keeps every
+        promise to me and breaks every promise with everyone else."""
+        a = self._agent()
+        s = self._state()
+        for _ in range(4):
+            a.update_beliefs_from_outcomes(s, s, [self._outcome([B, R], [])])
+            a.update_beliefs_from_outcomes(s, s, [self._outcome([B, G], [B])])
+        general = a.trust_model.get_reliability(B, CommitmentType.ALLIANCE)
+        toward_me = a.trust_model.get_reliability(B, CommitmentType.ALLIANCE, toward=R)
+        assert toward_me > general + 0.1
+
+    def test_a_public_outcome_is_not_counted_twice_for_a_party(self):
+        """OutcomeRule owns the deals I am in; R5 must keep its hands off."""
+        from src.agents.trust.rules import PublicRecordRule
+        a = self._agent()
+        before = a.trust_model.get_reliability(B, CommitmentType.ALLIANCE)
+        traces = PublicRecordRule().evaluate(
+            a.trust_model, {"public_outcome": self._outcome([B, R], [B])})
+        assert traces == []
+        assert a.trust_model.get_reliability(B, CommitmentType.ALLIANCE) == before
+
+
+# ── Bookkeeping defects these features exposed ───────────────────────────
+
+class TestTurnRecordIntegrity:
+    def test_a_pact_broken_the_turn_it_forms_is_still_recorded(self):
+        """It is dissolved at the end of the turn, but it was live during it.
+        Recording the survivors only made broken pacts outnumber made ones."""
+        from src.evaluation.metrics import deal_mix
+        found = False
+        for seed in range(1, 13):
+            random.seed(seed)
+            runner = _runner()
+            runner.run(verbose=False)
+            mix = deal_mix(runner.history)
+            for kind, made in mix["made"].items():
+                assert mix["broken"].get(kind, 0) <= made, (
+                    f"{kind}: {mix['broken'].get(kind)} broken but only {made} made")
+            if mix["made"].get("pact"):
+                found = True
+        assert found, "no pact in twelve games, so the check proved nothing"
+
+
+class TestHumanSeatDecisions:
+    """The examiner has to be able to answer two offers from the same player
+    differently. Keying answers on (sender, type) alone made a pact and a
+    bilateral alliance — and a public and a private one — the same question.
+    """
+
+    def _offer(self, **kw):
+        from src.agents.agent import HumanAgent
+        return HumanAgent(R, "Honest"), Message(
+            id=str(uuid.uuid4()), sender=B, receiver=R,
+            message_type=MessageType.PROPOSE,
+            commitment_type=CommitmentType.ALLIANCE, turns=3, **kw)
+
+    def test_a_pact_and_a_bilateral_offer_are_different_questions(self):
+        human, bilateral = self._offer()
+        _, pact = self._offer(coalition=[B, R, G])
+        assert human.decision_key(bilateral) != human.decision_key(pact)
+
+    def test_a_public_and_a_private_offer_are_different_questions(self):
+        human, public = self._offer()
+        _, private = self._offer(private=True)
+        assert human.decision_key(public) != human.decision_key(private)
+
+    def test_a_counter_offer_inherits_the_answer_already_given(self):
+        human, original = self._offer()
+        counter = original.model_copy(update={
+            "id": "other", "message_type": MessageType.COUNTER, "turns": 1})
+        assert human.decision_key(counter) == human.decision_key(original)
+
+
+class TestReplayCarriesTheDeals:
+    def test_a_replay_round_trips_every_deal_structure(self):
+        """A replay that records only the verdicts cannot show what was on
+        the table during a turn nobody broke anything."""
+        import tempfile
+        from src.engine.replay import (
+            save_replay, load_replay, reconstruct_commitments,
+        )
+        random.seed(2)
+        runner = _runner()
+        runner.run(verbose=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = save_replay(runner.history, runner.state,
+                               directory=tmp, filename="r.json")
+            replay = load_replay(path)
+
+        assert replay["version"] >= 2
+        turns = reconstruct_commitments(replay)
+        assert len(turns) == len(runner.history)
+        flat = [c for turn in turns for c in turn]
+        assert flat, "no commitment survived the round trip"
+        assert any(c.private for c in flat), "privacy was lost"
+        assert any(c.commitment_type == CommitmentType.EXCHANGE for c in flat), \
+            "exchanges were lost"
+        assert any(c.repay_turn for c in flat), "repayment turns were lost"
+
+        # ...and the live deals match what the runner actually held.
+        for recorded, step in zip(turns, runner.history):
+            assert {c.id for c in recorded} == {c.id for c in step.commitments}

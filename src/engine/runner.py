@@ -277,6 +277,12 @@ class GameRunner:
 
         self.calibration.extend(self._close_predictions(predictions, outcomes))
 
+        # What was on the table *during* this turn, captured before anything
+        # is torn down. A pact formed and broken in the same turn really did
+        # exist, and a record written after the dissolution below would show
+        # it being broken without ever showing it being made.
+        live_this_turn = list(self.commitments)
+
         # A pact that somebody walked out of does not keep binding the rest.
         # Releasing the loyal members is the whole difference between a
         # three-way promise and three separate ones.
@@ -326,7 +332,7 @@ class GameRunner:
         record = TurnRecord(
             state=self.state, orders=all_orders, outcomes=outcomes, log=log,
             traces=traces, messages=messages, beliefs=beliefs,
-            commitments=list(self.commitments), nodes=nodes,
+            commitments=live_this_turn, nodes=nodes,
         )
         self.history.append(record)
         self.nodes_per_turn.append(nodes)

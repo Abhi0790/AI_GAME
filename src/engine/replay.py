@@ -47,6 +47,20 @@ def _serialise_orders(orders: List[Order]) -> list:
     ]
 
 
+def _serialise_commitment(c) -> dict:
+    return {
+        "id": c.id,
+        "commitment_type": c.commitment_type.value,
+        "players": [p.value for p in c.players],
+        "valid_until_turn": c.valid_until_turn,
+        "target_territory": c.target_territory,
+        "supported_from": c.supported_from,
+        "dmz_territories": c.dmz_territories,
+        "private": c.private,
+        "repay_turn": c.repay_turn,
+    }
+
+
 def _serialise_outcomes(outcomes: list) -> list:
     result = []
     for o in outcomes:
@@ -56,6 +70,11 @@ def _serialise_outcomes(outcomes: list) -> list:
             "players": [p.value for p in o.commitment.players],
             "kept": o.kept,
             "broken_by": [p.value for p in o.broken_by],
+            # A replay that records only the verdict cannot say whether the
+            # broken promise was public, or bound three people, which is most
+            # of what makes the verdict interesting.
+            "private": o.commitment.private,
+            "pact": len(o.commitment.players) > 2,
         })
     return result
 
@@ -109,6 +128,7 @@ def _serialise_beliefs(beliefs: list) -> list:
             "alpha": b.alpha,
             "beta": b.beta_param,
             "reliability": b.expected_reliability,
+            "reliability_toward": b.reliability_toward_observer,
         }
         for b in beliefs
     ]
@@ -149,10 +169,17 @@ def save_replay(
             # replay that drops the messages cannot show why a deal existed.
             "messages": _serialise_messages(step.messages),
             "beliefs": _serialise_beliefs(step.beliefs),
+            # The deals live at the time, not just the ones graded. Without
+            # these a replay cannot show what was on the table during a turn
+            # nobody broke anything.
+            "commitments": [_serialise_commitment(c) for c in step.commitments],
+            "nodes": {p.value: n for p, n in (step.nodes or {}).items()},
         })
 
     replay = {
-        "version": 1,
+        # 2: turn records carry the messages, beliefs, live deals and search
+        # cost, not just the state and the verdicts.
+        "version": 2,
         "turns": len(turns_data),
         "final_state": _serialise_state(final_state),
         "history": turns_data,
@@ -169,6 +196,27 @@ def load_replay(path: str) -> dict:
     """Load a replay file and return the raw dict."""
     with open(path) as f:
         return json.load(f)
+
+
+def reconstruct_commitments(replay: dict) -> List[List[Commitment]]:
+    """The deals live during each turn, rebuilt as Commitment objects."""
+    out = []
+    for turn_data in replay["history"]:
+        out.append([
+            Commitment(
+                id=c["id"],
+                commitment_type=CommitmentType(c["commitment_type"]),
+                players=[Player(p) for p in c["players"]],
+                valid_until_turn=c["valid_until_turn"],
+                target_territory=c.get("target_territory"),
+                supported_from=c.get("supported_from"),
+                dmz_territories=c.get("dmz_territories"),
+                private=c.get("private", False),
+                repay_turn=c.get("repay_turn"),
+            )
+            for c in turn_data.get("commitments", [])
+        ])
+    return out
 
 
 def reconstruct_states(replay: dict) -> List[GameState]:

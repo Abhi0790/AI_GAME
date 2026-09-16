@@ -360,11 +360,12 @@ async def step_game(game_id: str, turn: HumanTurn = HumanTurn()):
                   target=o.get("target"), supported_from=o.get("supported_from"))
             for o in turn.orders
         ]
-        # Decisions arrive keyed by message id; the agent keys them by the
-        # deal so a counter-offer inherits the same answer.
+        # Decisions arrive keyed by message id, which is what the browser has
+        # to hand; the agent keys them by the deal so a counter-offer inherits
+        # the answer already given to the original.
         offered = {m.id: m for m in runner.begin_turn()}
         agent.decisions = {
-            (m.sender, m.commitment_type): accept
+            agent.decision_key(m): accept
             for mid, accept in turn.decisions.items()
             if (m := offered.get(mid)) is not None
         }

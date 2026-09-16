@@ -8,6 +8,9 @@ from typing import List, Dict, Any
 
 from src.common.schemas import Player, GameState
 from src.evaluation.metrics import (
+    deal_mix,
+    privacy_and_lying,
+    pair_trust_divergence,
     supply_center_timeline,
     betrayal_events,
     betrayal_rate_per_player,
@@ -70,6 +73,29 @@ def print_game_summary(history: list, final_state: GameState,
                   f"the engine, {acc['refuted']} refuted ({acc['known_lies']} were lies)")
             for name, row in sorted(acc["by_persona"].items()):
                 print(f"  {name:12s}: {row['made']} made, {row['refuted']} refuted")
+
+    mix = deal_mix(history)
+    if mix["made"]:
+        print("\nPromises made, and how often they were broken:")
+        for kind in sorted(mix["made"]):
+            made = mix["made"][kind]
+            print(f"  {kind:12s}: {mix['broken'].get(kind, 0):3d}/{made:<3d} "
+                  f"= {mix['break_rate'][kind]:.0%}")
+
+    if personas:
+        lying = privacy_and_lying(history, personas)
+        if lying["verdicts"]:
+            print("\nAccusations: " + ", ".join(
+                f"{v.lower()} {n}" for v, n in sorted(lying["verdicts"].items())))
+            if lying["lies"]:
+                print(f"  {lying['lies']} were lies, "
+                      f"{lying['unfalsifiable_lies']} of them unfalsifiable")
+
+    pair = pair_trust_divergence(history)
+    if pair["n"]:
+        print(f"\n\"Keeps promises to me\" vs \"keeps promises\": "
+              f"mean gap {pair['mean_where_diverged']:.3f} where they diverged, "
+              f"{pair['share_over_0.1']:.0%} of beliefs apart by more than 0.1")
 
     nodes = adjudications_per_turn(history)
     if any(nodes):

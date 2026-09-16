@@ -7,7 +7,7 @@ from src.common.schemas import (
 )
 from src.agents.trust.model import TrustModel
 from src.agents.trust.rules import (
-    RuleEngine, OutcomeRule, GossipRule, FalseAccusationRule,
+    RuleEngine, OutcomeRule, PublicRecordRule, GossipRule, FalseAccusationRule,
     FALSE_ACCUSATION_WEIGHT, GOSSIP_TRUST_THRESHOLD,
 )
 from src.agents.planner.planner import (
@@ -33,7 +33,9 @@ class Agent:
         self.persona_name = persona_name
 
         self.trust_model = TrustModel(player, self.persona.prior_alpha, self.persona.prior_beta)
-        self.rule_engine = RuleEngine([OutcomeRule(), GossipRule(), FalseAccusationRule()])
+        self.rule_engine = RuleEngine([
+            OutcomeRule(), PublicRecordRule(), GossipRule(), FalseAccusationRule(),
+        ])
 
         if planner_config is None:
             planner_config = PlannerConfig()
@@ -110,30 +112,40 @@ class Agent:
     # ── learning ────────────────────────────────────────────────────────
     def update_beliefs_from_outcomes(self, prev_state: GameState,
                                      new_state: GameState, outcomes: List):
-        """First-hand evidence only.
+        """Three tiers of evidence, and they are deliberately different.
 
-        An agent grades the deals it was *in*. What happened between two other
-        players is hearsay until somebody broadcasts it — which is what makes
-        the gossip rules, and lying, mean anything at all. Previously every
-        agent was handed every outcome, so no accusation could ever inform
-        anyone of anything they did not already know.
+          in the deal   first hand. Moves this player's reputation *and* what
+                        I have seen them do to me specifically.
+          public, not
+          in the deal   the engine published it, so I saw it. Reputation only:
+                        watching two other players deal says nothing about how
+                        either treats me.
+          private, not
+          in the deal   invisible. Somebody has to tell me, and they can lie —
+                        which is what the gossip rules are for.
+
+        The middle tier is what makes the pair records mean anything. Without
+        it an agent's general view of a player was built from exactly the same
+        evidence as its pair view, so the two could never disagree.
         """
         for o in outcomes:
-            if self.player not in o.commitment.players:
-                continue
-            incentive = max(
-                (self.estimate_incentive(prev_state, new_state, p) for p in o.broken_by),
-                default=0.0,
-            )
-            # The rule engine owns the Beta updates -- it applies them *and*
-            # records which rule fired. Calling update_from_outcome here too
-            # would count every outcome twice.
-            self.trust_traces.extend(self.rule_engine.process(
-                self.trust_model, {'outcome': o, 'incentive_to_defect': incentive}
-            ))
-            for breaker in o.broken_by:
-                if breaker != self.player:
-                    self.grudges[breaker] = self.grudges.get(breaker, 0.0) + 1.0
+            if self.player in o.commitment.players:
+                incentive = max(
+                    (self.estimate_incentive(prev_state, new_state, p) for p in o.broken_by),
+                    default=0.0,
+                )
+                # The rule engine owns the Beta updates -- it applies them
+                # *and* records which rule fired. Calling update_from_outcome
+                # here too would count every outcome twice.
+                self.trust_traces.extend(self.rule_engine.process(
+                    self.trust_model, {'outcome': o, 'incentive_to_defect': incentive}
+                ))
+                for breaker in o.broken_by:
+                    if breaker != self.player:
+                        self.grudges[breaker] = self.grudges.get(breaker, 0.0) + 1.0
+            elif not o.commitment.private:
+                self.trust_traces.extend(self.rule_engine.process(
+                    self.trust_model, {'public_outcome': o}))
 
         self.opponent_model.observe_commitment_outcomes(
             [o for o in outcomes if self.player in o.commitment.players])
@@ -319,10 +331,26 @@ class HumanAgent(Agent):
     def __init__(self, player: Player, persona_name: str = "Opportunist"):
         super().__init__(player, persona_name)
         self.pending_orders: List[Order] = []
-        # (sender, commitment_type) -> accept?  Keyed on the deal rather than
-        # the message id so a counter-offer inherits the same answer.
-        self.decisions: Dict[Tuple[Player, CommitmentType], bool] = {}
+        # deal identity -> accept?  Keyed on what the deal *is* rather than on
+        # the message id, so a counter-offer inherits the answer already given
+        # to the original. (sender, type) alone was not enough: a bilateral
+        # alliance and a three-way pact from the same player share both, and
+        # so do a public and a private version of one, so answering either
+        # silently answered the other.
+        self.decisions: Dict[tuple, bool] = {}
         self.inbox: List[Message] = []
+
+    @staticmethod
+    def decision_key(msg: Message) -> tuple:
+        """What makes two offers the same offer, from the answerer's side."""
+        return (
+            msg.sender,
+            msg.commitment_type,
+            frozenset(msg.coalition) if msg.coalition else None,
+            bool(msg.private),
+            msg.target_territory,
+            tuple(sorted(msg.dmz_territories or [])),
+        )
 
     def propose(self, state, commitments=None) -> List[Message]:
         return []  # the human answers offers; they do not auto-generate any
@@ -337,7 +365,7 @@ class HumanAgent(Agent):
             if msg.message_type not in (MessageType.PROPOSE, MessageType.COUNTER):
                 continue
             self.inbox.append(msg)
-            choice = self.decisions.get((msg.sender, msg.commitment_type))
+            choice = self.decisions.get(self.decision_key(msg))
             if choice is None:
                 continue  # no answer given: silence is neither accept nor reject
             replies.append(self.negotiation._accept(msg) if choice

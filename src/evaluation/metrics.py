@@ -313,3 +313,114 @@ def calibration_error(points: list, bins: int = 10) -> Optional[float]:
         return None
     return sum(r["count"] * abs(r["mean_predicted"] - r["observed_rate"])
                for r in rows) / n
+
+
+# ── The richer deal structures ───────────────────────────────────────────
+
+def deal_mix(history: list) -> Dict[str, Any]:
+    """What kinds of promise actually got made, and how they fared.
+
+    Without this the four structures are features nobody can tell apart in
+    the results: "betrayal rate 38%" says nothing about whether a private
+    exchange is broken more often than a public alliance.
+    """
+    made: Dict[str, int] = defaultdict(int)
+    broken: Dict[str, int] = defaultdict(int)
+    seen: set = set()
+    broken_ids: set = set()
+
+    def label(c):
+        out = [c.commitment_type.value, "private" if c.private else "public"]
+        if len(c.players) > 2:
+            out.append("pact")
+        return out
+
+    for step in history:
+        for c in (step.commitments or []):
+            if c.id in seen:
+                continue
+            seen.add(c.id)
+            for k in label(c):
+                made[k] += 1
+        for o in step.outcomes:
+            # Counted once per deal, not once per turn it stayed broken: a
+            # promise live for three turns and broken in each is one broken
+            # promise, and counting the turns pushed the rate above 1.
+            if o.kept or o.commitment.id in broken_ids:
+                continue
+            broken_ids.add(o.commitment.id)
+            for k in label(o.commitment):
+                broken[k] += 1
+
+    return {
+        "made": dict(made),
+        "broken": dict(broken),
+        "break_rate": {
+            k: broken.get(k, 0) / made[k] for k in made if made[k]
+        },
+    }
+
+
+def privacy_and_lying(history: list, personas: Dict[Player, str]) -> Dict[str, Any]:
+    """Does hiding a deal actually buy anything?
+
+    The claim the private-deal feature rests on is that an accusation the
+    engine cannot settle is worth making. These are the numbers that support
+    or sink it: how many accusations were unfalsifiable, how many of those
+    were lies, and whether the liars were believed.
+    """
+    verdicts: Dict[str, int] = defaultdict(int)
+    lies_by_persona: Dict[str, int] = defaultdict(int)
+    unfalsifiable_lies = refuted_lies = 0
+
+    for step in history:
+        for m in (step.messages or []):
+            if m.broadcast_kind != "BETRAYED":
+                continue
+            verdicts[m.engine_verdict or "NONE"] += 1
+            if m.truthful is False:
+                lies_by_persona[personas.get(m.sender, "Unknown")] += 1
+                if m.engine_verdict == "UNVERIFIED":
+                    unfalsifiable_lies += 1
+                elif m.engine_verdict == "REFUTED":
+                    refuted_lies += 1
+
+    total_lies = unfalsifiable_lies + refuted_lies
+    return {
+        "verdicts": dict(verdicts),
+        "lies": total_lies,
+        "lies_by_persona": dict(lies_by_persona),
+        "unfalsifiable_lies": unfalsifiable_lies,
+        "refuted_lies": refuted_lies,
+        # 1.0 means every lie went unchallenged, which would say the engine
+        # has stopped constraining anyone.
+        "lie_success_rate": (unfalsifiable_lies / total_lies) if total_lies else None,
+    }
+
+
+def pair_trust_divergence(history: list) -> Dict[str, Any]:
+    """How far "keeps promises to me" drifts from "keeps promises".
+
+    Reported two ways on purpose. The mean over every belief row is dominated
+    by pairs nothing has happened between yet, whose two numbers are both the
+    prior and therefore identical; averaging those in makes the layer look
+    dead when it is not. The second figure is the one that answers the
+    question: among relationships that have actually diverged, by how much.
+    """
+    gaps = []
+    for step in history:
+        for b in (step.beliefs or []):
+            if b.reliability_toward_observer is None:
+                continue
+            gaps.append(abs(b.reliability_toward_observer - b.expected_reliability))
+    if not gaps:
+        return {"mean_all": None, "mean_where_diverged": None,
+                "share_over_0.1": None, "n": 0}
+
+    moved = [g for g in gaps if g > 1e-9]
+    return {
+        "mean_all": sum(gaps) / len(gaps),
+        "mean_where_diverged": (sum(moved) / len(moved)) if moved else 0.0,
+        "share_over_0.1": sum(1 for g in gaps if g > 0.1) / len(gaps),
+        "n": len(gaps),
+    }

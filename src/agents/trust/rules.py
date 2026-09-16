@@ -1,4 +1,4 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from src.common.schemas import Player, CommitmentType, CommitmentOutcome, TrustTrace
 from src.agents.trust.model import TrustModel, break_weight, LAMBDA_INCENTIVE
 
@@ -61,6 +61,47 @@ class OutcomeRule(TrustRule):
                     f"{p.value} kept {c_type.value} with {counterparties}",
                     old_a, old_b, record.alpha, record.beta, "Trust increased"))
 
+        return traces
+
+
+class PublicRecordRule(TrustRule):
+    """R5 — the table's evidence: a public deal between two other players.
+
+    The engine publishes the verdict on every non-private commitment, so an
+    agent does not need to be in a deal to see it broken. That is what makes
+    a *reputation* distinct from a relationship: the general record absorbs
+    everything anyone did in the open, while the pair record stays first-hand.
+
+    Without this the two layers were built from identical evidence and the
+    pair record could never disagree with the reputation. It also leaves
+    gossip with the job it should have: private breaks are the only ones a
+    third party cannot see for themselves, so they are the only ones worth
+    talking about — and the only ones worth lying about.
+    """
+
+    def evaluate(self, model: TrustModel, facts: Dict[str, Any]) -> List[TrustTrace]:
+        traces = []
+        outcome: Optional[CommitmentOutcome] = facts.get('public_outcome')
+        if outcome is None or outcome.commitment.private:
+            return traces
+        if model.owner in outcome.commitment.players:
+            return traces  # first-hand; OutcomeRule owns it
+
+        c_type = outcome.commitment.commitment_type
+        for p in outcome.commitment.players:
+            record = model.get_record(p, c_type)
+            old_a, old_b = record.alpha, record.beta
+            broke = p in outcome.broken_by
+            # Reputation only. Watching two other players deal says nothing
+            # about how either of them treats *me*.
+            record.update(kept=not broke, discount=1.0)
+            traces.append(TrustTrace(
+                "R5: Public Record",
+                f"{p.value} {'broke' if broke else 'kept'} a public "
+                f"{c_type.value} with "
+                f"{', '.join(q.value for q in outcome.commitment.players if q != p)}",
+                old_a, old_b, record.alpha, record.beta,
+                "Seen in the open, so it moves their standing with everyone"))
         return traces
 
 
