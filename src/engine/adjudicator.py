@@ -1,5 +1,8 @@
 from typing import List, Dict, Tuple, Set, Optional
-from src.common.schemas import GameState, Order, OrderType, Player, Commitment, CommitmentType, Unit, CommitmentOutcome
+from src.common.schemas import (
+    GameState, Order, OrderType, Player, Commitment, CommitmentType, Unit,
+    CommitmentOutcome, exchange_leg_due,
+)
 from src.engine.board import is_adjacent, is_supply_center, get_all_territories
 
 class ResolutionLog:
@@ -7,6 +10,20 @@ class ResolutionLog:
         self.events = []
     def add(self, event: str):
         self.events.append(event)
+
+def _gave_support(orders: List[Order], supporter: Player,
+                  supported_from: Optional[str], target: Optional[str]) -> bool:
+    """Did this player actually write the support order they promised?
+
+    supported_from of None is a promise to support a *hold*, and matches an
+    order with no origin.
+    """
+    return any(
+        o.player == supporter and o.order_type == OrderType.SUPPORT
+        and o.supported_from == supported_from and o.target == target
+        for o in orders
+    )
+
 
 def verify_commitments(state: GameState, commitments: List[Commitment], orders: List[Order]) -> List[CommitmentOutcome]:
     outcomes = []
@@ -31,26 +48,36 @@ def verify_commitments(state: GameState, commitments: List[Commitment], orders: 
                         broken_by.add(p)
 
         elif c.commitment_type == CommitmentType.SUPPORT:
-            supporter = c.players[0]
-            supported_unit = c.supported_from
-            target = c.target_territory
+            if not _gave_support(orders, c.players[0], c.supported_from, c.target_territory):
+                broken_by.add(c.players[0])
 
-            gave_support = False
-            for o in orders:
-                if o.player == supporter and o.order_type == OrderType.SUPPORT and o.supported_from == supported_unit and o.target == target:
-                    gave_support = True
-            if not gave_support:
-                broken_by.add(supporter)
+        elif c.commitment_type == CommitmentType.EXCHANGE:
+            # Two legs, each owed by a different player on a different turn.
+            # Only the leg that is due can be broken, so the giver is off the
+            # hook once they have paid and the payer is not yet on it.
+            leg = exchange_leg_due(c, state.turn)
+            if leg == "give":
+                if not _gave_support(orders, c.players[0], c.supported_from,
+                                     c.target_territory):
+                    broken_by.add(c.players[0])
+            elif leg == "repay":
+                payer = c.players[1]
+                for o in orders:
+                    if (o.player == payer and o.order_type == OrderType.MOVE
+                            and o.target in (c.dmz_territories or [])):
+                        broken_by.add(payer)
 
         elif c.commitment_type == CommitmentType.ALLIANCE:
-            # Neither attacks the other's units or centres
-            p1, p2 = c.players[0], c.players[1]
+            # Nobody moves into any other member's units or centres. Written
+            # over every ordered pair rather than players[0] and players[1],
+            # so a three-way pact binds all three and not just the first two.
             for o in orders:
-                if o.order_type == OrderType.MOVE:
-                    if o.player == p1 and o.target in player_territories[p2]:
-                        broken_by.add(p1)
-                    if o.player == p2 and o.target in player_territories[p1]:
-                        broken_by.add(p2)
+                if o.order_type != OrderType.MOVE or o.player not in c.players:
+                    continue
+                for other in c.players:
+                    if other != o.player and o.target in player_territories[other]:
+                        broken_by.add(o.player)
+                        break
 
         kept = len(broken_by) == 0
         outcomes.append(CommitmentOutcome(commitment=c, kept=kept, broken_by=list(broken_by)))

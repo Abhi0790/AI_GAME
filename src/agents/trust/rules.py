@@ -28,9 +28,13 @@ class OutcomeRule(TrustRule):
 
         # The owner's own record is kept too: it is public evidence, and it is
         # what the planner prices its own betrayals against.
-        for p in outcome.commitment.players:
+        members = outcome.commitment.players
+        others = lambda p: [q for q in members if q != p]
+
+        for p in members:
             record = model.get_record(p, c_type)
             old_a, old_b = record.alpha, record.beta
+            counterparties = ", ".join(q.value for q in others(p)) or "nobody"
 
             if p in outcome.broken_by:
                 w = break_weight(incentive)
@@ -43,12 +47,19 @@ class OutcomeRule(TrustRule):
                     explanation = (f"w = 1 - {LAMBDA_INCENTIVE}x{incentive:.2f} = {w:.2f}: "
                                    f"near-full penalty, the break gained little")
 
-                record.update(kept=False, discount=w)
-                traces.append(TrustTrace(rule_name, f"{p} broke {c_type}", old_a, old_b, record.alpha, record.beta, explanation))
+                # Reputation and the specific relationships both move: the
+                # people who were in the deal learn more about this player
+                # than the table does.
+                model.observe(p, members, c_type, kept=False, discount=w)
+                traces.append(TrustTrace(
+                    rule_name, f"{p.value} broke {c_type.value} with {counterparties}",
+                    old_a, old_b, record.alpha, record.beta, explanation))
             else:
-                rule_name = "R0: Kept Promise"
-                record.update(kept=True, discount=1.0)
-                traces.append(TrustTrace(rule_name, f"{p} kept {c_type}", old_a, old_b, record.alpha, record.beta, "Trust increased"))
+                model.observe(p, members, c_type, kept=True, discount=1.0)
+                traces.append(TrustTrace(
+                    "R0: Kept Promise",
+                    f"{p.value} kept {c_type.value} with {counterparties}",
+                    old_a, old_b, record.alpha, record.beta, "Trust increased"))
 
         return traces
 

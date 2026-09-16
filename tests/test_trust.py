@@ -273,14 +273,40 @@ class TestEngineVerifiesAccusations:
                       commitment_type=CommitmentType.ALLIANCE)
         assert self._runner().verify_accusation(msg, [outcome]) == "CONFIRMED"
 
-    def test_an_invented_betrayal_is_refuted(self):
+    def test_a_kept_public_deal_refutes_the_accuser(self):
+        from src.common.schemas import Commitment, CommitmentOutcome, Message, MessageType
+        c = Commitment(id="c", commitment_type=CommitmentType.ALLIANCE,
+                       players=[Player.RED, Player.BLUE], valid_until_turn=5)
+        outcome = CommitmentOutcome(commitment=c, kept=True, broken_by=[])
+        msg = Message(id="m", sender=Player.RED, message_type=MessageType.BROADCAST,
+                      broadcast_kind="BETRAYED", broadcast_target=Player.BLUE,
+                      commitment_type=CommitmentType.ALLIANCE)
+        assert self._runner().verify_accusation(msg, [outcome]) == "REFUTED"
+
+    def test_an_invented_betrayal_cannot_be_settled(self):
+        """With no public deal between them the engine has nothing to check
+        against, so the claim stands or falls on the accuser's reputation.
+        That ambiguity is what gives lying an expected value."""
         from src.common.schemas import Message, MessageType
         msg = Message(id="m", sender=Player.RED, message_type=MessageType.BROADCAST,
                       broadcast_kind="BETRAYED", broadcast_target=Player.GREEN,
                       commitment_type=CommitmentType.ALLIANCE)
-        assert self._runner().verify_accusation(msg, []) == "REFUTED"
+        assert self._runner().verify_accusation(msg, []) == "UNVERIFIED"
 
-    def test_accusing_over_a_deal_you_were_not_in_is_refuted(self):
+    def test_a_broken_private_deal_is_not_published(self):
+        """The engine graded it, but saying so would make every private deal
+        public the moment it was broken."""
+        from src.common.schemas import Commitment, CommitmentOutcome, Message, MessageType
+        c = Commitment(id="c", commitment_type=CommitmentType.ALLIANCE,
+                       players=[Player.RED, Player.BLUE], valid_until_turn=5,
+                       private=True)
+        outcome = CommitmentOutcome(commitment=c, kept=False, broken_by=[Player.BLUE])
+        msg = Message(id="m", sender=Player.RED, message_type=MessageType.BROADCAST,
+                      broadcast_kind="BETRAYED", broadcast_target=Player.BLUE,
+                      commitment_type=CommitmentType.ALLIANCE)
+        assert self._runner().verify_accusation(msg, [outcome]) == "UNVERIFIED"
+
+    def test_accusing_over_a_deal_you_were_not_in_is_unverifiable(self):
         from src.common.schemas import Commitment, CommitmentOutcome, Message, MessageType
         c = Commitment(id="c", commitment_type=CommitmentType.ALLIANCE,
                        players=[Player.GREEN, Player.BLUE], valid_until_turn=5)
@@ -288,7 +314,7 @@ class TestEngineVerifiesAccusations:
         msg = Message(id="m", sender=Player.RED, message_type=MessageType.BROADCAST,
                       broadcast_kind="BETRAYED", broadcast_target=Player.BLUE,
                       commitment_type=CommitmentType.ALLIANCE)
-        assert self._runner().verify_accusation(msg, [outcome]) == "REFUTED"
+        assert self._runner().verify_accusation(msg, [outcome]) == "UNVERIFIED"
 
 
 # ── Calibration (issue #8) ───────────────────────────────────────────────

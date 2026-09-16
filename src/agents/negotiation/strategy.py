@@ -30,6 +30,9 @@ from src.engine.board import get_adjacent, is_supply_center, MAX_TURNS
 # Deals whose counterfactual gain is smaller than this are noise, not offers.
 MIN_DEAL_VALUE = 0.05
 MAX_PROPOSALS_PER_OPPONENT = 2
+# How far behind the leader this player has to be before a coalition against
+# them is worth organising.
+PACT_DEFICIT = 2
 # A threat repeated every turn is noise, and the receiver stops pricing it.
 THREAT_COOLDOWN = 3
 
@@ -48,6 +51,9 @@ class NegotiationStrategy:
         # and it is identical for every deal considered in the same position.
         # Memoised per (turn, live deals); a dozen offers then cost one prune.
         self._candidate_memo: Tuple = (None, None)
+        # Set by the Agent from the persona: how readily this player keeps a
+        # deal off the public record.
+        self.privacy_preference: float = 0.0
 
     # ------------------------------------------------------------------
     # Counterfactual machinery — one small search, reused by every branch
@@ -91,22 +97,57 @@ class NegotiationStrategy:
             return [], evaluate_state(state, self.player)
         return best, best_score
 
+    def _partners_of(self, deal: Optional[Commitment], partner: Player) -> List[Player]:
+        """Everyone whose behaviour the deal is supposed to change.
+
+        For a pact that is all the other members, not just whoever proposed
+        it: a three-way alliance is worth roughly twice a two-way one, and
+        pricing it against a single partner understated it so badly that
+        coalitions were almost never accepted.
+        """
+        if deal is not None and len(deal.players) > 2:
+            return [p for p in deal.players if p != self.player]
+        return [partner]
+
     def _worlds(self, state: GameState, partner: Player, deal: Optional[Commitment]
                 ) -> Tuple[List[Order], List[Order]]:
-        """Two pictures of the partner: honouring the deal, and exploiting it.
-
-        Everyone else is assumed hostile in both, so the comparison isolates
-        the partner's choice rather than the weather.
+        """Two pictures of the other side: honouring the deal, and exploiting
+        it. Everyone outside the deal is assumed hostile in both, so the
+        comparison isolates the members' choice rather than the weather.
         """
-        others = [o for o in hostile_world(state, self.player) if o.player != partner]
-        partner_units = [u for u in state.units if u.player == partner]
+        partners = self._partners_of(deal, partner)
+        others = [o for o in hostile_world(state, self.player)
+                  if o.player not in partners]
+        partner_units = [u for u in state.units if u.player in partners]
 
         kept: List[Order] = list(others)
         broken: List[Order] = list(others)
         mine = {u.territory for u in state.units if u.player == self.player}
         mine |= {t for t, owner in state.supply_centers.items() if owner == self.player}
 
+        # What "honouring" means for the partner depends on which side of the
+        # deal they are on. In an exchange I give the support and they repay
+        # later by staying out of somewhere, so their kept-world behaviour is
+        # the repayment, not a support order.
+        owed = set(deal.dmz_territories or []) if (
+            deal is not None and deal.commitment_type == CommitmentType.EXCHANGE) else set()
+
         for u in partner_units:
+            partner = u.player
+            if owed and partner == (deal.players[1] if deal else partner):
+                # Honouring the repayment: anywhere but the squares they owe
+                # me. Breaking it: straight into one of them, which is the
+                # whole reason the repayment was worth asking for.
+                clear = [a for a in get_adjacent(u.territory) if a not in owed]
+                kept.append(Order(player=partner, unit_territory=u.territory,
+                                  order_type=OrderType.MOVE if clear else OrderType.HOLD,
+                                  target=clear[0] if clear else None))
+                grab = next((a for a in get_adjacent(u.territory) if a in owed), None)
+                broken.append(Order(player=partner, unit_territory=u.territory,
+                                    order_type=OrderType.MOVE if grab else OrderType.HOLD,
+                                    target=grab))
+                continue
+
             # Honouring: stays off my squares. For a support deal, actually
             # gives the support that was promised.
             if (deal is not None and deal.commitment_type == CommitmentType.SUPPORT
@@ -183,7 +224,8 @@ class NegotiationStrategy:
         """
         v_none, v_kept, v_broken = self.deal_values(state, deal, partner, commitments)
         turns = max(1, deal.valid_until_turn - state.turn)
-        coop = cooperation_value(state, self.player, partner) * turns / MAX_TURNS
+        coop = sum(cooperation_value(state, self.player, q)
+                   for q in self._partners_of(deal, partner)) * turns / MAX_TURNS
         return turns * v_none, turns * v_kept + coop, turns * v_broken
 
     def exposure(self, state: GameState, partner: Player) -> float:
@@ -255,11 +297,99 @@ class NegotiationStrategy:
                                   target_territory=ou.territory))
                 break
 
+        # An exchange: I support their move this turn, and next turn they
+        # keep out of somewhere I want. The two halves are worth different
+        # amounts and fall due on different turns, which is the only way to
+        # trade something I have now for something I want later.
+        repayment = sorted({
+            t for u in my_units for t in get_adjacent(u.territory)
+            if is_supply_center(t)
+            and state.supply_centers.get(t) != partner
+            and any(t in get_adjacent(ou.territory) for ou in their_units)
+        })
+        for ou in their_units:
+            gift = next((adj for adj in get_adjacent(ou.territory)
+                         if any(adj in get_adjacent(mu.territory) for mu in my_units)
+                         and state.supply_centers.get(adj) not in (self.player, partner)),
+                        None)
+            owed = [t for t in repayment if t != gift]
+            if gift and owed:
+                offers.append(msg(commitment_type=CommitmentType.EXCHANGE, turns=2,
+                                  target_territory=gift, supported_from=ou.territory,
+                                  dmz_territories=owed[:2],
+                                  repay_turn=state.turn + 1))
+                break
+
+        # Anything aimed at a third party is worth keeping quiet: announcing
+        # it warns the target. A private deal also cannot be proved either way
+        # afterwards, which is a cost to the honest and an opportunity to the
+        # rest -- so the willingness to go private tracks the persona.
+        for offer in offers:
+            targets_a_third_party = (
+                offer.commitment_type in (CommitmentType.SUPPORT, CommitmentType.EXCHANGE)
+                and offer.target_territory is not None
+                and state.supply_centers.get(offer.target_territory)
+                not in (None, self.player, partner))
+            if targets_a_third_party or self.privacy_preference > 0.5:
+                offer.private = True
+
         return offers
+
+    # ------------------------------------------------------------------
+    # Multi-party pacts
+    # ------------------------------------------------------------------
+    def _pact_offers(self, state: GameState, trust_model: TrustModel) -> List[Message]:
+        """A three-way pact against whoever is running away with the game.
+
+        Two players behind the leader can each hold their own bilateral deal
+        and still be picked off one at a time. The point of a pact is that it
+        is a single promise: it only forms if everybody signs, and the moment
+        one member breaks it the others are released rather than left bound
+        to a coalition that no longer exists.
+        """
+        counts = {p: 0 for p in Player}
+        for owner in state.supply_centers.values():
+            if owner:
+                counts[owner] += 1
+        alive = [p for p in Player if any(u.player == p for u in state.units)]
+        leader = max(alive, key=lambda p: counts[p], default=None)
+        if leader is None or leader == self.player:
+            return []
+        if counts[leader] - counts[self.player] < PACT_DEFICIT:
+            return []
+
+        # Everyone else who is also behind, most trustworthy first.
+        allies = sorted(
+            (p for p in alive if p not in (self.player, leader)
+             and counts[p] < counts[leader]),
+            key=lambda p: -trust_model.get_reliability(
+                p, CommitmentType.ALLIANCE, toward=self.player))
+        if len(allies) < 2:
+            return []
+
+        members = [self.player] + allies[:2]
+        # One id shared by every copy: the members are answering the *same*
+        # proposal, and the runner only forms the pact once all of them have
+        # signed that one id. Giving each copy its own id meant the
+        # signatures never met and no pact could ever form.
+        pact_id = str(uuid.uuid4())
+        return [
+            Message(id=pact_id, sender=self.player, receiver=m,
+                    message_type=MessageType.PROPOSE,
+                    commitment_type=CommitmentType.ALLIANCE, turns=3,
+                    coalition=members)
+            for m in members if m != self.player
+        ]
 
     def generate_proposals(self, state: GameState, trust_model: TrustModel) -> List[Message]:
         proposals: List[Message] = []
         commitments = self._live_commitments
+
+        # A pact is proposed on the board position, not on any one partner's
+        # value to me, so it is generated once rather than per opponent.
+        if not any(len(c.players) > 2 and self.player in c.players
+                   for c in commitments):
+            proposals.extend(self._pact_offers(state, trust_model))
 
         for p in Player:
             if p == self.player:
@@ -313,8 +443,11 @@ class NegotiationStrategy:
         commitments = self._live_commitments
         deal = message_to_commitment(msg, self.player, state.turn)
         v_none, v_kept, v_broken = self.deal_totals(state, deal, msg.sender, commitments)
+        # toward=self.player: what matters is whether they keep promises
+        # *to me*, which can differ sharply from their general reputation.
         p_keep = trust_model.p_keeps(msg.sender, msg.commitment_type,
-                                     self.their_incentive(state, msg.sender, deal))
+                                     self.their_incentive(state, msg.sender, deal),
+                                     toward=self.player)
         ev = p_keep * v_kept + (1 - p_keep) * v_broken
 
         if ev > v_none:
@@ -334,7 +467,14 @@ class NegotiationStrategy:
 
     def _counter_terms(self, msg: Message) -> Optional[Message]:
         """The same deal, smaller. Halve the term; for a DMZ, give back the
-        territories I most want to keep my hands free on."""
+        territories I most want to keep my hands free on.
+
+        A pact is not counter-offerable: its members are answering one shared
+        proposal, and a bilateral counter would quietly drop the coalition and
+        turn it into a two-way deal nobody agreed to.
+        """
+        if msg.coalition:
+            return None
         turns = max(1, (msg.turns or 1) // 2)
         dmz = msg.dmz_territories
         if msg.commitment_type == CommitmentType.DMZ and dmz and len(dmz) > 1:
@@ -350,6 +490,7 @@ class NegotiationStrategy:
             commitment_type=msg.commitment_type, turns=turns,
             target_territory=msg.target_territory,
             supported_from=msg.supported_from, dmz_territories=dmz,
+            private=msg.private, repay_turn=msg.repay_turn,
         )
 
     # ------------------------------------------------------------------

@@ -41,6 +41,7 @@ class Agent:
         planner_config.vengeance = self.persona.vengeance
         self.planner = Planner(player, planner_config)
         self.negotiation = NegotiationStrategy(player, self.planner)
+        self.negotiation.privacy_preference = self.persona.privacy
 
         # Opponent model — tracks historical patterns
         self.opponent_model = OpponentModel(player)
@@ -175,10 +176,15 @@ class Agent:
             players' beliefs, but only if they rate me above the gossip
             threshold and the betrayer is still someone who matters.
           false — nobody betrayed me, but the leader is the problem and a
-            story about them would slow everyone else down. The engine will
-            refute it and R4 will bill me; a persona with a high `deception`
-            discounts that bill, which is exactly the bounded rationality the
-            rule exists to punish.
+            story about them would slow everyone else down.
+
+        The second one is now a real calculation rather than a character
+        flaw. The engine can only settle a claim about a deal it was told
+        about publicly, so a lie is refutable exactly when a public deal of
+        that kind exists between me and the target. Picking a pairing with no
+        public deal makes the accusation unfalsifiable, and then all that
+        stands against it is my own reputation. `deception` sets how much of
+        the residual risk the persona is willing to discount.
         """
         msgs: List[Message] = []
         my_standing = self.trust_model.general_trust(self.player)
@@ -188,6 +194,27 @@ class Agent:
                 id=str(uuid.uuid4()), sender=self.player, receiver=None,
                 message_type=MessageType.BROADCAST, broadcast_kind="BETRAYED",
                 broadcast_target=target, commitment_type=c_type, truthful=truthful)
+
+        # What the engine would find if it looked up each (player, type) I am
+        # involved in. A public break is provable; a public deal that was kept
+        # refutes anyone naming that type. Keeping a public promise while
+        # breaking a private one of the same kind is therefore a refutation
+        # shield, and there is no point walking into it.
+        broke_publicly: Dict[Tuple[Player, CommitmentType], bool] = {}
+        kept_publicly: Dict[Tuple[Player, CommitmentType], bool] = {}
+        broke_privately: Dict[Tuple[Player, CommitmentType], bool] = {}
+        for o in outcomes:
+            if self.player not in o.commitment.players:
+                continue
+            c_type = o.commitment.commitment_type
+            for q in o.commitment.players:
+                if q == self.player:
+                    continue
+                key = (q, c_type)
+                if q in o.broken_by:
+                    (broke_privately if o.commitment.private else broke_publicly)[key] = True
+                elif not o.commitment.private:
+                    kept_publicly[key] = True
 
         accused = set()
         for o in outcomes:
@@ -200,9 +227,16 @@ class Agent:
                 # matter — shouting about a player with nothing left is noise.
                 believable = my_standing > GOSSIP_TRUST_THRESHOLD
                 still_matters = any(u.player == betrayer for u in state.units)
-                if believable and still_matters:
-                    accused.add(betrayer)
-                    msgs.append(accuse(betrayer, o.commitment.commitment_type, True))
+                if not (believable and still_matters):
+                    continue
+
+                key = (betrayer, o.commitment.commitment_type)
+                provable = broke_publicly.get(key, False)
+                deniable = broke_privately.get(key, False) and not kept_publicly.get(key, False)
+                if not (provable or deniable):
+                    continue  # true, but the engine would refute me
+                accused.add(betrayer)
+                msgs.append(accuse(betrayer, o.commitment.commitment_type, True))
 
         if msgs or self.persona.deception <= 0:
             return msgs
@@ -217,10 +251,28 @@ class Agent:
         if my_standing <= GOSSIP_TRUST_THRESHOLD:
             return msgs
 
+        # Which kinds of promise between me and the leader the engine could
+        # look up. A claim about any of those can be refuted; anything else
+        # cannot, and that is what a liar picks.
+        refutable = {
+            o.commitment.commitment_type for o in outcomes
+            if not o.commitment.private
+            and self.player in o.commitment.players
+            and leader in o.commitment.players
+        }
+        deniable = [t for t in CommitmentType if t not in refutable]
+        if not deniable:
+            return msgs
+
         gain = counts[leader] - counts[self.player]
+        # An unfalsifiable lie still costs something if nobody believes it,
+        # but it cannot trigger R4. The risk that remains is the reputation
+        # already staked on being believed.
         perceived_risk = FALSE_ACCUSATION_WEIGHT * (1.0 - self.persona.deception)
+        if not refutable:
+            perceived_risk *= 0.25
         if gain > perceived_risk:
-            msgs.append(accuse(leader, CommitmentType.ALLIANCE, False))
+            msgs.append(accuse(leader, deniable[0], False))
         return msgs
 
     # ── negotiation ─────────────────────────────────────────────────────

@@ -49,6 +49,9 @@ class GameRunner:
         self.on_turn_resolved = on_turn_resolved
         self.negotiation_rounds = 3
         self._opening: Optional[List[Message]] = None
+        # proposal id -> members who have said yes so far. A pact needs all
+        # of them before it binds anybody.
+        self._pact_signatures: Dict[str, set] = {}
 
     # ── negotiation ─────────────────────────────────────────────────────
     def begin_turn(self) -> List[Message]:
@@ -98,12 +101,25 @@ class GameRunner:
                 orig = by_id.get(rep.reference_id) if rep.reference_id else None
                 if orig is None:
                     continue  # accepting a proposal that does not exist
-                if orig.receiver is not None and orig.receiver != rep.sender:
+                if orig.coalition:
+                    if rep.sender not in orig.coalition:
+                        continue  # not a member of the pact being formed
+                elif orig.receiver is not None and orig.receiver != rep.sender:
                     continue  # accepting a deal that was offered to someone else
                 bad = invalid_proposal_reason(orig, self.max_turns)
                 if bad:
                     log_lines.append(f"Proposal rejected by the engine: {bad}")
                     continue
+
+                if orig.coalition:
+                    # A pact is one promise, not a bundle of bilateral ones:
+                    # it comes into force only once every named member has
+                    # said yes, and until then it binds nobody.
+                    signed = self._pact_signatures.setdefault(orig.id, {orig.sender})
+                    signed.add(rep.sender)
+                    if not set(orig.coalition) <= signed:
+                        continue
+
                 c = message_to_commitment(orig, rep.sender, self.state.turn)
                 existing = next(
                     (e for e in self.commitments
@@ -113,6 +129,10 @@ class GameRunner:
                     # a second copy that the planner would price twice.
                     existing.valid_until_turn = max(
                         existing.valid_until_turn, c.valid_until_turn)
+                    # Publicity only travels one way. Once a promise has been
+                    # made in the open it cannot be walked back into the dark,
+                    # so re-proposing it privately does not hide it again.
+                    existing.private = existing.private and c.private
                 else:
                     self.commitments.append(c)
                     # Players in a fixed order, so the same pair always reads
@@ -122,9 +142,14 @@ class GameRunner:
                     pair = " & ".join(sorted(p.value for p in c.players))
                     detail = (f" on {', '.join(c.dmz_territories)}"
                               if c.dmz_territories else "")
+                    tags = "".join([
+                        " [pact]" if len(c.players) > 2 else "",
+                        " [private]" if c.private else "",
+                        f" [repay turn {c.repay_turn}]" if c.repay_turn else "",
+                    ])
                     log_lines.append(
                         f"Commitment created: {c.commitment_type.value} between "
-                        f"{pair}{detail} until turn {c.valid_until_turn}")
+                        f"{pair}{detail} until turn {c.valid_until_turn}{tags}")
 
             spoken.extend(replies)
             new_messages = replies
@@ -135,21 +160,32 @@ class GameRunner:
     def verify_accusation(self, msg: Message, outcomes: List) -> str:
         """The engine's verdict on a claim that somebody betrayed somebody.
 
-        Agents, not the runner, decide what to say now, so a claim can be
-        false. The engine is the only thing that saw every order, so it is
-        the only thing that can settle it: CONFIRMED if it adjudicated that
-        exact break this turn, REFUTED otherwise — including when the deal
-        the accuser is describing never existed.
+        Agents decide what to say, so a claim can be false, and the engine is
+        the only thing that saw every order. But it can only settle a claim
+        about a deal it was told about *publicly*:
+
+          CONFIRMED  a public deal between these two was broken this turn
+          REFUTED    a public deal between these two was kept this turn
+          UNVERIFIED no public deal of that kind exists between them, so the
+                     claim is either about a private deal or invented, and
+                     nothing the engine knows separates the two
+
+        That third verdict is what makes lying a decision rather than a
+        mistake: a liar who picks a partner they have no public deal with
+        cannot be refuted, and third parties have only the accuser's own
+        reputation to go on.
         """
-        for o in outcomes:
-            if o.kept:
-                continue
-            if msg.sender not in o.commitment.players:
-                continue
-            if msg.broadcast_target not in o.broken_by:
-                continue
-            if msg.commitment_type and msg.commitment_type != o.commitment.commitment_type:
-                continue
+        relevant = [
+            o for o in outcomes
+            if not o.commitment.private
+            and msg.sender in o.commitment.players
+            and msg.broadcast_target in o.commitment.players
+            and (not msg.commitment_type
+                 or msg.commitment_type == o.commitment.commitment_type)
+        ]
+        if not relevant:
+            return "UNVERIFIED"
+        if any(msg.broadcast_target in o.broken_by for o in relevant):
             return "CONFIRMED"
         return "REFUTED"
 
@@ -240,6 +276,22 @@ class GameRunner:
                 say(f"Commitment BROKEN by {o.broken_by}: {o.commitment.commitment_type}")
 
         self.calibration.extend(self._close_predictions(predictions, outcomes))
+
+        # A pact that somebody walked out of does not keep binding the rest.
+        # Releasing the loyal members is the whole difference between a
+        # three-way promise and three separate ones.
+        dissolved = {
+            o.commitment.id for o in outcomes
+            if not o.kept and len(o.commitment.players) > 2
+        }
+        for cid in dissolved:
+            broken = next(o for o in outcomes if o.commitment.id == cid)
+            log.events.append(
+                f"Pact dissolved: {broken.commitment.commitment_type.value} between "
+                f"{' & '.join(sorted(p.value for p in broken.commitment.players))} "
+                f"broken by {', '.join(sorted(p.value for p in broken.broken_by))}; "
+                f"the others are released")
+        self.commitments = [c for c in self.commitments if c.id not in dissolved]
 
         # 6. Agents decide whether to accuse anyone; the engine settles it
         broadcasts: List[Message] = []

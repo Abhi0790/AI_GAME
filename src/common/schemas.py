@@ -52,17 +52,33 @@ class CommitmentType(str, Enum):
     ALLIANCE = "Alliance"
     SUPPORT = "Support"
     DMZ = "DMZ"
+    # A trade across turns: one side gives support now, the other pays it back
+    # later by staying out of somewhere. The two legs are deliberately of
+    # unequal value and fall due on different turns, which is what makes it a
+    # bargain rather than a matching of like for like -- and what creates the
+    # obvious defection: take the support, then do not pay.
+    EXCHANGE = "Exchange"
 
 class Commitment(BaseModel):
     id: str
     commitment_type: CommitmentType
     players: List[Player] # Players involved
     valid_until_turn: int
-    
+
     # Specifics depending on type
-    target_territory: Optional[str] = None # For Support
-    supported_from: Optional[str] = None # For Support
-    dmz_territories: Optional[List[str]] = None # For DMZ
+    target_territory: Optional[str] = None # For Support / the Exchange's give leg
+    supported_from: Optional[str] = None # For Support / the Exchange's give leg
+    dmz_territories: Optional[List[str]] = None # For DMZ / the Exchange's repay leg
+
+    # A private deal is graded by the engine exactly like any other, but the
+    # engine does not *publish* the verdict. Nobody outside it can tell a
+    # truthful accusation about one from an invented accusation, which is what
+    # gives lying an expected value instead of being always refutable.
+    private: bool = False
+
+    # Which turn the Exchange's repayment leg falls due. Before it, only the
+    # giver can break the deal; on it, only the payer can.
+    repay_turn: Optional[int] = None
 
 class MessageType(str, Enum):
     PROPOSE = "Propose"
@@ -91,6 +107,14 @@ class Message(BaseModel):
     broadcast_kind: Optional[str] = None # e.g. "BETRAYED"
     broadcast_target: Optional[Player] = None
 
+    # Every member a multi-party pact is meant to bind, sender included. The
+    # deal only comes into force once all of them have accepted, so a pact is
+    # not a bundle of bilateral promises -- it is one promise that either
+    # forms or does not.
+    coalition: Optional[List[Player]] = None
+    private: bool = False
+    repay_turn: Optional[int] = None
+
     # An accusation is a claim, not a fact. The engine grades it against what
     # it actually adjudicated and stamps a verdict before anyone acts on it,
     # so a liar can be caught and a truthful accuser can be believed.
@@ -103,7 +127,10 @@ class BeliefSnapshot(BaseModel):
     commitment_type: CommitmentType
     alpha: float
     beta_param: float # Avoid clash with beta function
-    expected_reliability: float
+    expected_reliability: float          # the subject's general reputation
+    # ...and the same belief narrowed to "does this player keep promises to
+    # *me*", which is the number the observer actually signs on.
+    reliability_toward_observer: Optional[float] = None
 
 
 # ── Traces & outcomes (shared: every component reads these, none owns them) ──
@@ -149,6 +176,19 @@ class TrustTrace:
         self.explanation = explanation
 
 
+def exchange_leg_due(c: "Commitment", turn: int) -> Optional[str]:
+    """Which half of an Exchange is owed this turn: "give", "repay" or neither.
+
+    players[0] gives the support on the turn the deal is struck; players[1]
+    pays it back on repay_turn by keeping out of the listed territories.
+    """
+    if c.commitment_type != CommitmentType.EXCHANGE:
+        return None
+    if c.repay_turn is not None and turn >= c.repay_turn:
+        return "repay"
+    return "give"
+
+
 def commitment_key(c: "Commitment"):
     """Identity of a deal, ignoring who asked. Red-Blue and Blue-Red are the
     same alliance, and both sides propose it every turn, so without this the
@@ -160,6 +200,11 @@ def commitment_key(c: "Commitment"):
         c.supported_from,
         tuple(sorted(c.dmz_territories or [])),
     )
+    # Privacy is deliberately NOT part of the identity. A public and a private
+    # version of the same promise between the same players are one promise,
+    # not two, and treating them as two let the same relationship stack twice
+    # and be priced twice. Which of the two wins is handled where deals are
+    # renewed: publicity is one-way, because you cannot un-say it.
 
 
 def invalid_proposal_reason(msg: Message, max_turns: int = 12) -> Optional[str]:
@@ -187,7 +232,7 @@ def invalid_proposal_reason(msg: Message, max_turns: int = 12) -> Optional[str]:
         unknown = [t for t in msg.dmz_territories if t not in territories]
         if unknown:
             return f"DMZ over unknown territories {unknown}"
-    if msg.commitment_type == CommitmentType.SUPPORT:
+    if msg.commitment_type in (CommitmentType.SUPPORT, CommitmentType.EXCHANGE):
         if msg.target_territory not in territories:
             return f"support of unknown territory {msg.target_territory!r}"
         if msg.supported_from is not None:
@@ -195,21 +240,51 @@ def invalid_proposal_reason(msg: Message, max_turns: int = 12) -> Optional[str]:
                 return f"support from unknown territory {msg.supported_from!r}"
             if not is_adjacent(msg.supported_from, msg.target_territory):
                 return "supported move is not between adjacent territories"
+    if msg.commitment_type == CommitmentType.EXCHANGE:
+        # Both legs have to be real, or half the bargain is unenforceable.
+        if not msg.dmz_territories:
+            return "exchange with nothing owed in return"
+        unknown = [t for t in msg.dmz_territories if t not in territories]
+        if unknown:
+            return f"exchange repayment over unknown territories {unknown}"
+        if msg.repay_turn is not None and msg.repay_turn > max_turns:
+            return f"repayment falls due on turn {msg.repay_turn}, after the game ends"
     if msg.receiver == msg.sender:
         return "proposal addressed to its own sender"
+    if msg.coalition is not None:
+        if len(set(msg.coalition)) < 3:
+            return "a pact needs at least three members"
+        if msg.sender not in msg.coalition:
+            return "pact proposed by somebody outside it"
+        if msg.receiver is not None and msg.receiver not in msg.coalition:
+            return "pact offered to somebody outside it"
     return None
 
 
 def message_to_commitment(msg: Message, accepted_by: Player, current_turn: int) -> Commitment:
-    """Translate an accepted proposal into an engine-checkable commitment."""
+    """Translate an accepted proposal into an engine-checkable commitment.
+
+    For a pact the members come from the coalition rather than from whoever
+    happened to answer last, so all of them are bound by the same object.
+    """
+    if msg.coalition:
+        players = list(dict.fromkeys(msg.coalition))
+    else:
+        players = [msg.sender, accepted_by]
+
+    turns = msg.turns if msg.turns else 1
     return Commitment(
         id=msg.id,
         commitment_type=msg.commitment_type,
-        players=[msg.sender, accepted_by],
-        valid_until_turn=current_turn + (msg.turns if msg.turns else 1),
+        players=players,
+        valid_until_turn=current_turn + turns,
         target_territory=msg.target_territory,
         supported_from=msg.supported_from,
         dmz_territories=msg.dmz_territories,
+        private=msg.private,
+        repay_turn=(msg.repay_turn if msg.repay_turn is not None
+                    else (current_turn + 1
+                          if msg.commitment_type == CommitmentType.EXCHANGE else None)),
     )
 
 

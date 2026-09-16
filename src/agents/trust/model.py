@@ -50,6 +50,14 @@ BN_TEMPTED = 0.35
 # scale counts as maximum temptation.
 BN_INCENTIVE_SCALE = 0.1
 
+# How much pair-specific evidence it takes before "X keeps promises to *me*"
+# outweighs "X keeps promises". Whether Blue honours deals with Red is a
+# different question from whether Blue honours deals, and it is the one that
+# decides whether Red should sign; but one observation is not a pattern, so
+# the pair record is shrunk toward the general one until it has some weight
+# behind it.
+PAIR_SHRINKAGE = 2.0
+
 
 def set_parameters(lambda_incentive: Optional[float] = None,
                    evidence_decay: Optional[float] = None,
@@ -113,10 +121,22 @@ class TrustRecord:
 
 
 class TrustModel:
+    """Who keeps promises, in general and to whom.
+
+    Two layers of evidence. `records` pools everything observed about a player
+    regardless of who they were dealing with — that is their reputation.
+    `pair_records` keeps the same thing per (player, counterparty), because
+    "Blue honours deals with Red" and "Blue honours deals" are different
+    claims and coalitions turn on the first one. Predictions blend the two,
+    weighted by how much pair-specific evidence there actually is.
+    """
+
     def __init__(self, owner: Player, prior_alpha: float = 1.0, prior_beta: float = 1.0):
         self.owner = owner
-        # target_player -> commitment_type -> TrustRecord
+        # target_player -> commitment_type -> TrustRecord  (reputation)
         self.records: Dict[Player, Dict[CommitmentType, TrustRecord]] = {}
+        # (target_player, counterparty) -> commitment_type -> TrustRecord
+        self.pair_records: Dict[Tuple[Player, Player], Dict[CommitmentType, TrustRecord]] = {}
         self.prior_alpha = prior_alpha
         self.prior_beta = prior_beta
 
@@ -127,12 +147,38 @@ class TrustModel:
             self.records[player][c_type] = TrustRecord(self.prior_alpha, self.prior_beta)
         return self.records[player][c_type]
 
-    def get_reliability(self, player: Player, c_type: CommitmentType) -> float:
-        """The Reliability node alone: the Beta posterior mean."""
-        return self.get_record(player, c_type).get_expected_value()
+    def get_pair_record(self, player: Player, counterparty: Player,
+                        c_type: CommitmentType) -> TrustRecord:
+        key = (player, counterparty)
+        if key not in self.pair_records:
+            self.pair_records[key] = {}
+        if c_type not in self.pair_records[key]:
+            self.pair_records[key][c_type] = TrustRecord(self.prior_alpha, self.prior_beta)
+        return self.pair_records[key][c_type]
+
+    def _pair_weight(self, record: TrustRecord) -> float:
+        """How much to trust the pair record over the general one."""
+        evidence = max(0.0, record.alpha + record.beta
+                       - (self.prior_alpha + self.prior_beta))
+        return evidence / (evidence + PAIR_SHRINKAGE)
+
+    def get_reliability(self, player: Player, c_type: CommitmentType,
+                        toward: Optional[Player] = None) -> float:
+        """The Reliability node: the Beta posterior mean.
+
+        With *toward*, the pair record shrunk toward the general one, so a
+        player who has been straight with me but treacherous with everybody
+        else reads differently depending on who is asking.
+        """
+        general = self.get_record(player, c_type).get_expected_value()
+        if toward is None or toward == player:
+            return general
+        pair = self.get_pair_record(player, toward, c_type)
+        w = self._pair_weight(pair)
+        return w * pair.get_expected_value() + (1.0 - w) * general
 
     def p_keeps(self, player: Player, c_type: CommitmentType,
-                incentive: float = 0.0) -> float:
+                incentive: float = 0.0, toward: Optional[Player] = None) -> float:
         """P(keeps this commitment) — the whole network, not one node.
 
         Reliability says what they usually do; incentive says what the board
@@ -140,7 +186,21 @@ class TrustModel:
         next to an undefended centre of mine is not a safe bet, and the Beta
         mean on its own cannot say so.
         """
-        return p_keeps_given(self.get_reliability(player, c_type), incentive)
+        return p_keeps_given(self.get_reliability(player, c_type, toward), incentive)
+
+    def observe(self, subject: Player, counterparties, c_type: CommitmentType,
+                kept: bool, discount: float = 1.0):
+        """Record one graded promise against the general and pair records.
+
+        A pact with three members produces one general observation and one per
+        counterparty, so betraying two people at once costs twice with each of
+        them and once with the table.
+        """
+        self.get_record(subject, c_type).update(kept=kept, discount=discount)
+        for other in counterparties:
+            if other != subject:
+                self.get_pair_record(subject, other, c_type).update(
+                    kept=kept, discount=discount)
 
     def update_from_outcome(self, outcome: CommitmentOutcome, incentive_to_defect: float = 0.0):
         """Apply one graded commitment to the Beta records.
@@ -150,27 +210,41 @@ class TrustModel:
         is the best estimate I have of how much reputation I stand to lose,
         which is what the planner prices a betrayal against.
         """
-        for p in outcome.commitment.players:
-            record = self.get_record(p, outcome.commitment.commitment_type)
-            if p in outcome.broken_by:
-                record.update(kept=False, discount=break_weight(incentive_to_defect))
-            else:
-                record.update(kept=True, discount=1.0)
+        players = outcome.commitment.players
+        for p in players:
+            broke = p in outcome.broken_by
+            self.observe(p, players, outcome.commitment.commitment_type,
+                         kept=not broke,
+                         discount=break_weight(incentive_to_defect) if broke else 1.0)
 
     def reputation_drop(self, player: Player, c_type: CommitmentType,
-                        incentive: float = 0.0) -> float:
+                        incentive: float = 0.0,
+                        toward: Optional[Player] = None) -> float:
         """Delta-P: how far belief that *player* keeps this kind of promise
         falls if they break it now.
 
         Measured through the network, at the incentive they are acting under,
         because that is the number an observer will actually revise: the
-        posterior moves from Beta(a, b) to Beta(a*d, b*d + w).
+        posterior moves from Beta(a, b) to Beta(a*d, b*d + w). Both layers
+        move, so betraying the one partner who has always trusted you costs
+        more than betraying a stranger.
         """
-        r = self.get_record(player, c_type)
         w = break_weight(incentive)
-        a, b = r.alpha * EVIDENCE_DECAY, r.beta * EVIDENCE_DECAY
-        before = self.p_keeps(player, c_type, incentive)
-        after = p_keeps_given(a / (a + b + w), incentive)
+        before = self.p_keeps(player, c_type, incentive, toward)
+
+        def broken_mean(rec: TrustRecord) -> float:
+            a, b = rec.alpha * EVIDENCE_DECAY, rec.beta * EVIDENCE_DECAY
+            return a / (a + b + w)
+
+        general_after = broken_mean(self.get_record(player, c_type))
+        if toward is None or toward == player:
+            after_reliability = general_after
+        else:
+            pair = self.get_pair_record(player, toward, c_type)
+            pw = self._pair_weight(pair)
+            after_reliability = pw * broken_mean(pair) + (1.0 - pw) * general_after
+
+        after = p_keeps_given(after_reliability, incentive)
         return max(0.0, before - after)
 
     def apply_gossip(self, gossip_sender: Player, accused: Player, c_type: CommitmentType):
@@ -205,6 +279,9 @@ class TrustModel:
                 alpha=(rec := self.get_record(subject, c_type)).alpha,
                 beta_param=rec.beta,
                 expected_reliability=rec.get_expected_value(),
+                reliability_toward_observer=(
+                    None if subject == self.owner
+                    else self.get_reliability(subject, c_type, toward=self.owner)),
             )
             for subject in Player
             for c_type in CommitmentType

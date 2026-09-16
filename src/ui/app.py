@@ -21,7 +21,7 @@ from pydantic import BaseModel
 from fastapi.templating import Jinja2Templates
 
 from src.common.schemas import (
-    Player, Order, OrderType, MessageType, describe_message,
+    Player, Order, OrderType, MessageType, describe_message, exchange_leg_due,
 )
 from src.agents.agent import Agent, HumanAgent
 from src.agents.chaos import ChaosAgent
@@ -77,6 +77,9 @@ def _serialise_message(m):
         "type": m.message_type.value,
         "commitment_type": m.commitment_type.value if m.commitment_type else None,
         "turns": m.turns,
+        "coalition": [p.value for p in m.coalition] if m.coalition else None,
+        "private": m.private,
+        "repay_turn": m.repay_turn,
         "target_territory": m.target_territory,
         "supported_from": m.supported_from,
         "dmz_territories": m.dmz_territories,
@@ -91,7 +94,7 @@ def _serialise_message(m):
     }
 
 
-def _serialise_commitment(c):
+def _serialise_commitment(c, turn=None):
     return {
         "id": c.id,
         "type": c.commitment_type.value,
@@ -100,6 +103,10 @@ def _serialise_commitment(c):
         "target_territory": c.target_territory,
         "supported_from": c.supported_from,
         "dmz_territories": c.dmz_territories,
+        "private": c.private,
+        "pact": len(c.players) > 2,
+        "repay_turn": c.repay_turn,
+        "leg_due": exchange_leg_due(c, turn) if turn is not None else None,
     }
 
 
@@ -127,7 +134,8 @@ def _serialise_history_step(step):
         ],
         "log": step.log.events,
         "messages": [_serialise_message(m) for m in step.messages],
-        "commitments": [_serialise_commitment(c) for c in step.commitments],
+        "commitments": [_serialise_commitment(c, step.state.turn)
+                        for c in step.commitments],
         "nodes": {p.value: n for p, n in (step.nodes or {}).items()},
         # The trust panel was dead because nothing ever sent it this.
         "beliefs": [
@@ -138,6 +146,11 @@ def _serialise_history_step(step):
                 "alpha": round(b.alpha, 3),
                 "beta": round(b.beta_param, 3),
                 "reliability": round(b.expected_reliability, 3),
+                # "...and does this player keep promises to *me*", which is
+                # what the observer actually signs on.
+                "reliability_toward": (
+                    None if b.reliability_toward_observer is None
+                    else round(b.reliability_toward_observer, 3)),
             }
             for b in step.beliefs
         ],
@@ -182,7 +195,8 @@ def _game_summary(g) -> dict:
         "max_turns": runner.max_turns,
         "win_centers": WIN_CENTERS,
         "history_length": len(runner.history),
-        "commitments": [_serialise_commitment(c) for c in runner.commitments],
+        "commitments": [_serialise_commitment(c, runner.state.turn)
+                        for c in runner.commitments],
         "human_seat": g["human_seat"].value if g["human_seat"] else None,
         "personas": {p.value: getattr(a, "persona_name", "?")
                      for p, a in runner.agents.items()},
@@ -370,6 +384,161 @@ async def get_replay(game_id: str):
         "turns": len(runner.history),
         "history": [_serialise_history_step(s) for s in runner.history],
         **_game_summary(g),
+    }
+
+
+@app.get("/api/game/{game_id}/inspect/{player}")
+async def inspect(game_id: str, player: str, turn: Optional[int] = None):
+    """Everything behind one seat's current decision, step by step.
+
+    This is the dashboard's detailed mode: not a summary of what the agent
+    did, but the intermediate quantities it did it from — every live deal
+    priced three ways, the trust network's two inputs and its output, and the
+    candidate order sets that survived pruning with their scores. Re-derived
+    on demand from the live state rather than logged every turn, because
+    logging all of it for four seats over twelve turns is most of a megabyte
+    per game and nobody reads 95% of it.
+    """
+    g = _get(game_id)
+    if g is None:
+        return JSONResponse(status_code=404, content={"error": "Game not found"})
+    try:
+        seat = Player(player)
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": f"no such seat {player!r}"})
+
+    runner = g["runner"]
+    agent = runner.agents[seat]
+    state = runner.state
+    if not hasattr(agent, "negotiation"):
+        return {"seat": seat.value, "kind": "not an AI seat", "deals": [],
+                "beliefs": [], "candidates": []}
+
+    from src.agents.planner.planner import (
+        evaluate_state, cooperation_value, penalty_breakdown, breaks_commitment,
+        defection_incentive,
+    )
+    from src.common.schemas import CommitmentType
+
+    ns = agent.negotiation
+    ns._live_commitments = runner.commitments
+
+    # ── every live deal, priced the way the agent prices it ──────────────
+    deals = []
+    for c in runner.commitments:
+        if seat not in c.players:
+            continue
+        others = [p for p in c.players if p != seat]
+        v_none, v_kept, v_broken = ns.deal_totals(state, c, others[0], runner.commitments)
+        iota = defection_incentive(state, seat, [c])
+        rows = []
+        for other in others:
+            p_keep = agent.trust_model.p_keeps(
+                other, c.commitment_type,
+                defection_incentive(state, other, [c]), toward=seat)
+            rows.append({
+                "partner": other.value,
+                "p_keeps": round(p_keep, 4),
+                "reliability_general": round(
+                    agent.trust_model.get_reliability(other, c.commitment_type), 4),
+                "reliability_toward_me": round(
+                    agent.trust_model.get_reliability(
+                        other, c.commitment_type, toward=seat), 4),
+                "their_incentive": round(defection_incentive(state, other, [c]), 4),
+                "vcoop": round(cooperation_value(state, seat, other), 4),
+                "my_delta_p_if_i_break": round(
+                    agent.trust_model.reputation_drop(
+                        seat, c.commitment_type, iota, toward=other), 4),
+            })
+        deals.append({
+            "commitment": _serialise_commitment(c, state.turn),
+            "v_none": round(v_none, 4),
+            "v_kept": round(v_kept, 4),
+            "v_broken": round(v_broken, 4),
+            "expected_value_of_keeping": round(
+                sum(r["p_keeps"] for r in rows) / max(1, len(rows)) * v_kept
+                + (1 - sum(r["p_keeps"] for r in rows) / max(1, len(rows))) * v_broken,
+                4),
+            "my_incentive_to_break": round(iota, 4),
+            "parties": rows,
+        })
+
+    # ── the candidate order sets, scored ─────────────────────────────────
+    from src.engine.orders import generate_all_order_sets
+    from src.engine.adjudicator import resolve as _resolve
+
+    planner = agent.planner
+    planner.nodes = 0
+    all_sets = generate_all_order_sets(state, seat)
+    kept_sets, pruned = planner.prune(state, all_sets, runner.commitments)
+    worlds = ns._worlds(state, next(iter(
+        [p for p in Player if p != seat])), None)[1]
+
+    candidates = []
+    for cand in kept_sets[:12]:
+        after, _o, _l = _resolve(state, cand + worlds, runner.commitments)
+        breaks = breaks_commitment(state, seat, cand, runner.commitments)
+        rows = penalty_breakdown(state, seat, cand, runner.commitments,
+                                 planner.config, agent.trust_model,
+                                 defection_incentive(state, seat, runner.commitments))
+        candidates.append({
+            "orders": [
+                {"unit": o.unit_territory, "type": o.order_type.value,
+                 "target": o.target, "supported_from": o.supported_from}
+                for o in cand
+            ],
+            "value": round(evaluate_state(after, seat), 4),
+            "breaks_a_promise": breaks,
+            "penalty": round(sum(r[-1] for r in rows), 4),
+            "penalty_rows": [
+                {"partner": r[0].value, "vcoop": round(r[1], 4),
+                 "delta_p": round(r[2], 4), "horizon": round(r[3], 4),
+                 "amount": round(r[4], 4)}
+                for r in rows
+            ],
+        })
+    candidates.sort(key=lambda c: c["value"] - c["penalty"], reverse=True)
+
+    # ── the belief table, both layers ────────────────────────────────────
+    beliefs = []
+    for subject in Player:
+        if subject == seat:
+            continue
+        for c_type in CommitmentType:
+            rec = agent.trust_model.get_record(subject, c_type)
+            pair = agent.trust_model.get_pair_record(subject, seat, c_type)
+            beliefs.append({
+                "subject": subject.value,
+                "commitment_type": c_type.value,
+                "alpha": round(rec.alpha, 3), "beta": round(rec.beta, 3),
+                "reliability_general": round(rec.get_expected_value(), 4),
+                "pair_alpha": round(pair.alpha, 3), "pair_beta": round(pair.beta, 3),
+                "reliability_toward_me": round(
+                    agent.trust_model.get_reliability(subject, c_type, toward=seat), 4),
+                "pair_weight": round(agent.trust_model._pair_weight(pair), 4),
+            })
+
+    return {
+        "seat": seat.value,
+        "persona": getattr(agent, "persona_name", "?"),
+        "turn": state.turn,
+        "position_value": round(evaluate_state(state, seat), 4),
+        "stance": {p.value: round(v, 4) for p, v in agent.stance().items()},
+        "grudges": {p.value: round(v, 3) for p, v in agent.grudges.items()},
+        "deterrence": {p.value: round(v, 3) for p, v in agent.deterrence.items()},
+        "search": {
+            "algorithm": planner.config.search,
+            "depth": planner.config.depth,
+            "opponent_samples": planner.config.opponent_samples,
+            "node_budget": planner.config.node_budget,
+            "candidates_total": len(all_sets),
+            "candidates_kept": len(kept_sets),
+            "pruned": pruned,
+            "adjudications_spent_pruning": planner.nodes,
+        },
+        "deals": deals,
+        "candidates": candidates,
+        "beliefs": beliefs,
     }
 
 
