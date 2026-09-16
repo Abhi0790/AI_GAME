@@ -1,24 +1,33 @@
-from typing import List, Dict
-import uuid
+from typing import List, Dict, Optional
 
 from src.common.schemas import (
     GameState, Order, Player, Commitment, Message, MessageType,
-    CommitmentType, Unit,
+    Unit, CalibrationPoint, TurnRecord, describe_message,
 )
-from src.common.schemas import message_to_commitment, commitment_key
-from src.engine.adjudicator import resolve, verify_commitments
+from src.common.schemas import (
+    message_to_commitment, commitment_key, invalid_proposal_reason,
+)
+from src.engine.adjudicator import resolve
 from src.engine.board import (
-    get_all_territories, get_supply_centers, is_supply_center,
-    HOME_CENTERS, WIN_CENTERS, MAX_TURNS, TERRITORIES,
+    get_all_territories, get_supply_centers, HOME_CENTERS, WIN_CENTERS, MAX_TURNS,
 )
 
 
 class GameRunner:
-    def __init__(self, agents: List, on_turn_resolved=None):
+    def __init__(self, agents: List, on_turn_resolved=None, broadcast_enabled: bool = True):
         self.agents = {a.player: a for a in agents}
         self.commitments: List[Commitment] = []
-        self.history = []
-        
+        self.history: List[TurnRecord] = []
+        # (predicted P(keeps), what actually happened) pairs. The reliability
+        # diagram and the Brier score are computed from nothing else.
+        self.calibration: List[CalibrationPoint] = []
+        # Adjudications spent per turn, per player — the x-axis of the
+        # search-variant figure.
+        self.nodes_per_turn: List[Dict[Player, int]] = []
+        # The gossip channel can be switched off, which is the control
+        # condition for the turns-to-coalition figure.
+        self.broadcast_enabled = broadcast_enabled
+
         # Initial state: two units per player, one on each home centre.
         units = [
             Unit(player=Player(p), territory=t)
@@ -39,30 +48,37 @@ class GameRunner:
         self.max_turns = MAX_TURNS
         self.on_turn_resolved = on_turn_resolved
         self.negotiation_rounds = 3
-        
-    def step(self, verbose: bool = False):
-        """Run one full turn: negotiate, plan, resolve, gossip, update beliefs.
+        self._opening: Optional[List[Message]] = None
 
-        Returns the history step (state, orders, outcomes, log, traces).
-        Single source of truth for a turn — the CLI and the web UI both call it.
+    # ── negotiation ─────────────────────────────────────────────────────
+    def begin_turn(self) -> List[Message]:
+        """Generate this turn's opening proposals without playing the turn.
+
+        The web UI calls this to show a human seat what it has been offered
+        before asking for orders; `step()` then reuses exactly these messages
+        instead of generating a second, different set.
         """
-        t = self.state.turn
-        say = print if verbose else (lambda *a, **k: None)
-        say(f"--- Turn {t} ---")
+        if self._opening is None:
+            self._opening = [m for a in self.agents.values()
+                             for m in a.propose(self.state, self.commitments)]
+        return self._opening
 
-        # 1. Drop expired commitments
-        self.commitments = [c for c in self.commitments if c.valid_until_turn >= t]
+    def _negotiate(self, log_lines: List[str]) -> List[Message]:
+        """Run the negotiation rounds and return every sentence spoken.
 
-        # 2. Negotiation rounds
-        new_messages = []
-        for a in self.agents.values():
-            new_messages.extend(a.propose(self.state))
+        Rounds 2 and 3 are no longer no-ops: a proposal that fails an agent's
+        expected-value test can come back as a COUNTER, which the other side
+        then answers.
+        """
+        new_messages = self.begin_turn()
+        self._opening = None
+        spoken: List[Message] = list(new_messages)
 
         for _ in range(self.negotiation_rounds):
             if not new_messages:
                 break
 
-            inbox = {p: [] for p in Player}
+            inbox: Dict[Player, List[Message]] = {p: [] for p in Player}
             for m in new_messages:
                 if m.receiver:
                     inbox[m.receiver].append(m)
@@ -71,42 +87,151 @@ class GameRunner:
                         if p != m.sender:
                             inbox[p].append(m)
 
-            replies = []
+            replies: List[Message] = []
             for p, a in self.agents.items():
-                replies.extend(a.reply(self.state, inbox[p]))
-                for msg in inbox[p]:
-                    if msg.message_type == MessageType.BROADCAST:
-                        a.receive_gossip(msg)
+                replies.extend(a.reply(self.state, inbox[p], self.commitments))
 
+            by_id = {m.id: m for m in new_messages}
             for rep in replies:
-                if rep.message_type == MessageType.ACCEPT:
-                    orig = next((m for m in new_messages if m.id == rep.reference_id), None)
-                    if orig:
-                        c = message_to_commitment(orig, rep.sender, self.state.turn)
-                        existing = next(
-                            (e for e in self.commitments
-                             if commitment_key(e) == commitment_key(c)), None)
-                        if existing:
-                            # Same deal proposed again: renew it, do not stack
-                            # a second copy that the planner would price twice.
-                            existing.valid_until_turn = max(
-                                existing.valid_until_turn, c.valid_until_turn)
-                        else:
-                            self.commitments.append(c)
-                            say(f"Commitment created: {c.commitment_type} between {c.players}")
+                if rep.message_type != MessageType.ACCEPT:
+                    continue
+                orig = by_id.get(rep.reference_id) if rep.reference_id else None
+                if orig is None:
+                    continue  # accepting a proposal that does not exist
+                if orig.receiver is not None and orig.receiver != rep.sender:
+                    continue  # accepting a deal that was offered to someone else
+                bad = invalid_proposal_reason(orig, self.max_turns)
+                if bad:
+                    log_lines.append(f"Proposal rejected by the engine: {bad}")
+                    continue
+                c = message_to_commitment(orig, rep.sender, self.state.turn)
+                existing = next(
+                    (e for e in self.commitments
+                     if commitment_key(e) == commitment_key(c)), None)
+                if existing:
+                    # Same deal proposed again: renew it, do not stack
+                    # a second copy that the planner would price twice.
+                    existing.valid_until_turn = max(
+                        existing.valid_until_turn, c.valid_until_turn)
+                else:
+                    self.commitments.append(c)
+                    # Players in a fixed order, so the same pair always reads
+                    # the same way: "Blue & Red" and "Red & Blue" are one
+                    # relationship and printing both makes distinct deals look
+                    # like duplicates.
+                    pair = " & ".join(sorted(p.value for p in c.players))
+                    detail = (f" on {', '.join(c.dmz_territories)}"
+                              if c.dmz_territories else "")
+                    log_lines.append(
+                        f"Commitment created: {c.commitment_type.value} between "
+                        f"{pair}{detail} until turn {c.valid_until_turn}")
 
+            spoken.extend(replies)
             new_messages = replies
 
-        # 3. Agents choose orders
-        all_orders = []
-        traces = {}
+        return spoken
+
+    # ── accusations ─────────────────────────────────────────────────────
+    def verify_accusation(self, msg: Message, outcomes: List) -> str:
+        """The engine's verdict on a claim that somebody betrayed somebody.
+
+        Agents, not the runner, decide what to say now, so a claim can be
+        false. The engine is the only thing that saw every order, so it is
+        the only thing that can settle it: CONFIRMED if it adjudicated that
+        exact break this turn, REFUTED otherwise — including when the deal
+        the accuser is describing never existed.
+        """
+        for o in outcomes:
+            if o.kept:
+                continue
+            if msg.sender not in o.commitment.players:
+                continue
+            if msg.broadcast_target not in o.broken_by:
+                continue
+            if msg.commitment_type and msg.commitment_type != o.commitment.commitment_type:
+                continue
+            return "CONFIRMED"
+        return "REFUTED"
+
+    # ── calibration ─────────────────────────────────────────────────────
+    def _open_predictions(self) -> List[CalibrationPoint]:
+        """Every live deal, priced by every agent in it, before the turn."""
+        points = []
+        for c in self.commitments:
+            for observer in c.players:
+                agent = self.agents.get(observer)
+                if agent is None:
+                    continue
+                for subject in c.players:
+                    if subject == observer:
+                        continue
+                    if hasattr(agent, "predict_keep_parts"):
+                        r, i, pred = agent.predict_keep_parts(self.state, c, subject)
+                    else:
+                        r, i, pred = 0.5, 0.0, agent.predict_keep(self.state, c, subject)
+                    points.append(CalibrationPoint(
+                        turn=self.state.turn, observer=observer, subject=subject,
+                        commitment_type=c.commitment_type, commitment_id=c.id,
+                        predicted=pred, reliability=r, incentive=i,
+                    ))
+        return points
+
+    @staticmethod
+    def _close_predictions(points: List[CalibrationPoint], outcomes: List):
+        # Keyed on the deal, not on (player, type): two live DMZs with the
+        # same partner are two separate promises, and breaking one must not
+        # mark the prediction about the other as wrong.
+        broken = {(o.commitment.id, p) for o in outcomes if not o.kept
+                  for p in o.broken_by}
+        graded = {(o.commitment.id, p) for o in outcomes
+                  for p in o.commitment.players}
+        closed = []
+        for pt in points:
+            if (pt.commitment_id, pt.subject) not in graded:
+                continue
+            pt.observed = (pt.commitment_id, pt.subject) not in broken
+            closed.append(pt)
+        return closed
+
+    # ── the turn ────────────────────────────────────────────────────────
+    def step(self, verbose: bool = False) -> TurnRecord:
+        """Run one full turn: negotiate, plan, resolve, gossip, update beliefs.
+
+        Single source of truth for a turn — the CLI and the web UI both call it.
+        """
+        t = self.state.turn
+        say = print if verbose else (lambda *a, **k: None)
+        say(f"--- Turn {t} ---")
+
+        # 1. Drop expired commitments; let grudges and fear cool off.
+        self.commitments = [c for c in self.commitments if c.valid_until_turn >= t]
+        for a in self.agents.values():
+            if hasattr(a, "decay_stance"):
+                a.decay_stance()
+
+        # 2. Negotiation rounds
+        negotiation_lines: List[str] = []
+        messages = self._negotiate(negotiation_lines)
+        for line in negotiation_lines:
+            say(line)
+
+        # 3. What every agent predicts about the deals now on the table
+        predictions = self._open_predictions()
+
+        # 4. Agents choose orders
+        all_orders: List[Order] = []
+        traces: Dict[Player, object] = {}
+        nodes: Dict[Player, int] = {}
         for p, a in self.agents.items():
             orders, trace = a.act(self.state, self.commitments)
             all_orders.extend(orders)
             traces[p] = trace
+            nodes[p] = getattr(getattr(a, "planner", None), "nodes", 0)
 
-        # 4. Engine resolves and grades commitments
+        # 5. Engine resolves and grades commitments
         new_state, outcomes, log = resolve(self.state, all_orders, self.commitments)
+        for line in negotiation_lines:
+            log.events.insert(0, line)
         if self.on_turn_resolved:
             self.on_turn_resolved(self.state, all_orders, log)
 
@@ -114,42 +239,47 @@ class GameRunner:
             if not o.kept:
                 say(f"Commitment BROKEN by {o.broken_by}: {o.commitment.commitment_type}")
 
-        # 5. Victims broadcast BETRAYED so the gossip rules fire elsewhere
-        for o in outcomes:
-            if o.kept:
-                continue
-            for victim in o.commitment.players:
-                if victim in o.broken_by:
-                    continue
-                for betrayer in o.broken_by:
-                    gossip_msg = Message(
-                        id=str(uuid.uuid4()),
-                        sender=victim,
-                        receiver=None,
-                        message_type=MessageType.BROADCAST,
-                        broadcast_kind="BETRAYED",
-                        broadcast_target=betrayer,
-                        commitment_type=o.commitment.commitment_type,
-                    )
-                    for p, a in self.agents.items():
-                        if p != victim:
-                            a.receive_gossip(gossip_msg)
-                    say(f"[GOSSIP] {victim.value} broadcasts: "
-                        f"{betrayer.value} broke {o.commitment.commitment_type.value}")
+        self.calibration.extend(self._close_predictions(predictions, outcomes))
+
+        # 6. Agents decide whether to accuse anyone; the engine settles it
+        broadcasts: List[Message] = []
+        if self.broadcast_enabled:
+            for p, a in self.agents.items():
+                for msg in a.consider_broadcast(new_state, outcomes):
+                    msg.engine_verdict = self.verify_accusation(msg, outcomes)
+                    broadcasts.append(msg)
+                    log.events.append(
+                        f"{describe_message(msg)}"
+                        f"{' (LIE)' if msg.truthful is False else ''}")
+                    say(f"[GOSSIP] {describe_message(msg)}")
+
+            for msg in broadcasts:
+                for p, a in self.agents.items():
+                    if p != msg.sender:
+                        a.receive_gossip(msg)
+
+        messages.extend(broadcasts)
 
         for l in log.events:
             say(l)
 
-        # 6. Beliefs and opponent models update on what the engine published
+        # 7. Beliefs and opponent models update on what they witnessed
         for a in self.agents.values():
             a.update_beliefs_from_outcomes(self.state, new_state, outcomes)
             if hasattr(a, 'observe_orders'):
                 a.observe_orders(all_orders)
 
-        step_data = (self.state, all_orders, outcomes, log, traces)
-        self.history.append(step_data)
+        beliefs = [b for a in self.agents.values() for b in a.beliefs()]
+
+        record = TurnRecord(
+            state=self.state, orders=all_orders, outcomes=outcomes, log=log,
+            traces=traces, messages=messages, beliefs=beliefs,
+            commitments=list(self.commitments), nodes=nodes,
+        )
+        self.history.append(record)
+        self.nodes_per_turn.append(nodes)
         self.state = new_state
-        return step_data
+        return record
 
     def center_counts(self):
         counts = {p: 0 for p in Player}
@@ -164,17 +294,35 @@ class GameRunner:
         leader = max(counts, key=counts.get)
         return leader if counts[leader] >= WIN_CENTERS else None
 
-    def run(self):
+    def run(self, verbose: bool = True):
         while self.state.turn <= self.max_turns:
-            self.step(verbose=True)
+            self.step(verbose=verbose)
             champion = self.winner()
             if champion:
-                print(f"Game Over: {champion.value} reached {WIN_CENTERS} centres "
-                      f"on turn {self.state.turn - 1}")
+                if verbose:
+                    print(f"Game Over: {champion.value} reached {WIN_CENTERS} centres "
+                          f"on turn {self.state.turn - 1}")
                 break
         else:
-            print("Game Over: horizon reached")
+            if verbose:
+                print("Game Over: horizon reached")
 
         counts = self.center_counts()
-        print("Final Centers:", {p.value: c for p, c in counts.items()})
+        if verbose:
+            print("Final Centers:", {p.value: c for p, c in counts.items()})
         return self.winner() or max(counts, key=counts.get)
+
+    # ── evaluation helpers ──────────────────────────────────────────────
+    def personas(self) -> Dict[Player, str]:
+        """Seat -> persona name, so metrics can be keyed by persona instead of
+        by colour. Without this no persona comparison is computable at all."""
+        return {p: getattr(a, "persona_name", "Unknown") for p, a in self.agents.items()}
+
+    def brier_score(self) -> Optional[float]:
+        """Mean squared error of P(keeps) against what happened. 0 is perfect,
+        0.25 is what you get by always saying 50%."""
+        pairs = [(c.predicted, 1.0 if c.observed else 0.0)
+                 for c in self.calibration if c.observed is not None]
+        if not pairs:
+            return None
+        return sum((p - o) ** 2 for p, o in pairs) / len(pairs)

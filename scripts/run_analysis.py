@@ -45,12 +45,14 @@ def main():
         ]
         runner = GameRunner(agents)
         runner.run()
+        personas = runner.personas()
 
         scores = final_scores(runner.state)
         all_results.append(scores)
         all_histories.append(runner.history)
 
-        print_game_summary(runner.history, runner.state)
+        print_game_summary(runner.history, runner.state,
+                           runner.personas(), runner.calibration)
 
         if args.save_replays:
             path = save_replay(
@@ -67,7 +69,7 @@ def main():
             )
 
     if args.games > 1:
-        print_tournament_summary(all_results, all_histories)
+        print_tournament_summary(all_results, all_histories, personas)
 
 
 if __name__ == "__main__":

@@ -1,428 +1,683 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Territory Game — AI Dashboard</title>
-    <style>
-        :root {
-            --bg: #0f1117;
-            --surface: #1a1d27;
-            --border: #2a2d3a;
-            --text: #e0e0e0;
-            --muted: #888;
-            --red: #e74c3c;
-            --blue: #3498db;
-            --green: #2ecc71;
-            --gold: #f1c40f;
-            --accent: #9b59b6;
-        }
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Territory — Negotiating Agents</title>
+<style>
+:root {
+  --bg:#0b0d10; --panel:#111419; --panel-2:#161a21; --line:#1e232b;
+  --text:#d8dee6; --muted:#78838f; --dim:#4d5761;
+  --accent:#6ea8fe; --good:#5fb98b; --bad:#d4736f; --warn:#d6ab5c;
+  --red:#d4605a; --blue:#5b8fd6; --green:#5aa878; --gold:#c9a24a;
+  --mono:"SF Mono",ui-monospace,Menlo,Consolas,monospace;
+  --r:6px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{
+  background:var(--bg);color:var(--text);
+  font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+button,select,input{font:inherit;color:inherit}
+button{cursor:pointer;border:1px solid var(--line);background:var(--panel-2);
+  border-radius:var(--r);padding:6px 12px;transition:border-color .12s,background .12s}
+button:hover:not(:disabled){border-color:#2e353f;background:#1b2028}
+button:disabled{opacity:.35;cursor:not-allowed}
+button.primary{background:var(--accent);border-color:var(--accent);color:#0b0d10;font-weight:600}
+button.primary:hover:not(:disabled){background:#82b5ff;border-color:#82b5ff}
+select{background:var(--panel-2);border:1px solid var(--line);border-radius:var(--r);padding:5px 8px}
+select:focus,button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 
-        /* Layout */
-        .header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; justify-content: space-between; }
-        .header h1 { font-size: 1.3rem; }
-        .header .controls { display: flex; gap: 10px; align-items: center; }
-        .header button { padding: 8px 18px; border: none; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.85rem; }
-        .btn-primary { background: var(--accent); color: #fff; }
-        .btn-primary:hover { opacity: 0.9; }
-        .btn-secondary { background: var(--border); color: var(--text); }
-        .btn-secondary:hover { background: #3a3d4a; }
-        .btn-danger { background: var(--red); color: #fff; }
+/* ─ shell ─ */
+header{
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+  padding:10px 18px;border-bottom:1px solid var(--line);background:var(--panel);
+}
+header h1{font-size:13px;font-weight:600;letter-spacing:.02em}
+header h1 span{color:var(--muted);font-weight:400}
+.spacer{flex:1}
+.ctl{display:flex;align-items:center;gap:8px}
+.ctl label{color:var(--muted);font-size:12px}
+.pill{font-size:11px;padding:3px 9px;border-radius:99px;border:1px solid var(--line);color:var(--muted)}
+.pill.live{color:var(--good);border-color:#24402f}
+.pill.done{color:var(--warn);border-color:#43371f}
 
-        .main { display: grid; grid-template-columns: 1fr 350px; grid-template-rows: auto 1fr; gap: 0; height: calc(100vh - 52px); }
+main{display:grid;grid-template-columns:minmax(0,1fr) 400px;height:calc(100vh - 49px)}
+@media (max-width:1000px){main{grid-template-columns:1fr;height:auto}}
 
-        /* Board */
-        .board-panel { grid-column: 1; grid-row: 1 / 3; padding: 20px; display: flex; flex-direction: column; align-items: center; }
-        .board-panel svg { max-width: 700px; width: 100%; }
-        .scoreboard { display: flex; gap: 16px; margin-top: 16px; flex-wrap: wrap; justify-content: center; }
-        .score-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 10px 18px; text-align: center; min-width: 100px; }
-        .score-card .name { font-weight: 700; font-size: 0.9rem; }
-        .score-card .count { font-size: 1.6rem; font-weight: 700; margin-top: 4px; }
+.stage{display:flex;flex-direction:column;min-width:0;overflow-y:auto;padding:18px}
+aside{border-left:1px solid var(--line);display:flex;flex-direction:column;min-height:0;background:var(--panel)}
+@media (max-width:1000px){aside{border-left:none;border-top:1px solid var(--line);height:70vh}}
 
-        /* Right sidebar */
-        .sidebar { grid-column: 2; grid-row: 1 / 3; border-left: 1px solid var(--border); display: flex; flex-direction: column; overflow: hidden; }
-        .tabs { display: flex; border-bottom: 1px solid var(--border); }
-        .tab { flex: 1; padding: 10px; text-align: center; cursor: pointer; font-size: 0.8rem; font-weight: 600; color: var(--muted); background: var(--surface); border: none; }
-        .tab.active { color: var(--accent); border-bottom: 2px solid var(--accent); }
-        .tab-content { flex: 1; overflow-y: auto; padding: 14px; font-size: 0.82rem; }
-        .tab-panel { display: none; }
-        .tab-panel.active { display: block; }
+/* ─ board ─ */
+.board{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:8px}
+.board svg{display:block;width:100%;height:auto;max-height:56vh}
+.edge{stroke:#232931;stroke-width:1.4}
+.node{stroke:#0b0d10;stroke-width:1.5;cursor:default}
+.node.sc{stroke-width:2.5}
+.node.sel{stroke:var(--accent);stroke-width:3}
+.nlabel{font:600 10px var(--mono);fill:#e8edf3;text-anchor:middle;dominant-baseline:central;pointer-events:none}
+.nunit{font:700 9px var(--mono);text-anchor:middle;dominant-baseline:central;pointer-events:none;fill:#0b0d10}
+.arrow{fill:none;stroke-width:2.2}
+.arrow.ok{stroke:var(--good)}
+.arrow.no{stroke:var(--bad);stroke-dasharray:5 4}
+.arrow.sup{stroke:var(--accent);stroke-width:1.4;stroke-dasharray:3 3;opacity:.8}
 
-        /* Trust matrix */
-        .trust-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
-        .trust-table th, .trust-table td { padding: 6px 8px; border: 1px solid var(--border); text-align: center; }
-        .trust-table th { background: var(--surface); }
+/* ─ scores ─ */
+.scores{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px}
+.score{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:9px 11px}
+.score .who{display:flex;align-items:center;gap:6px;font-weight:600;font-size:12px}
+.dot{width:8px;height:8px;border-radius:2px;flex:none}
+.score .n{font:600 22px/1.1 var(--mono);margin-top:5px}
+.score .sub{color:var(--muted);font-size:11px;margin-top:1px}
+.score.me{border-color:var(--accent)}
 
-        /* Log entries */
-        .log-entry { padding: 6px 0; border-bottom: 1px solid var(--border); line-height: 1.4; }
-        .log-entry .turn-label { font-weight: 700; color: var(--accent); }
-        .log-entry.betrayal { color: var(--red); font-weight: 600; }
-        .log-entry.commitment { color: var(--green); }
-        .log-entry.gossip { color: var(--gold); font-style: italic; }
+/* ─ scrubber ─ */
+.scrub{display:flex;align-items:center;gap:10px;margin-top:12px;background:var(--panel);
+  border:1px solid var(--line);border-radius:var(--r);padding:9px 12px}
+.scrub input[type=range]{flex:1;accent-color:var(--accent);background:transparent}
+.scrub .lbl{font:11px var(--mono);color:var(--muted);white-space:nowrap}
 
-        /* Traces */
-        .trace-block { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-bottom: 10px; }
-        .trace-block h4 { margin-bottom: 6px; }
-        .trace-block p { font-size: 0.78rem; color: var(--muted); line-height: 1.5; }
-        .trace-block .broke { color: var(--red); font-weight: 600; }
+/* ─ human seat ─ */
+.seat{margin-top:12px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r)}
+.seat h3{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted);
+  padding:10px 12px;border-bottom:1px solid var(--line);font-weight:600}
+.seat .body{padding:11px 12px;display:grid;gap:9px}
+.orow{display:grid;grid-template-columns:52px 1fr;gap:9px;align-items:center}
+.orow .u{font:600 11px var(--mono);color:var(--muted)}
+.orow select{width:100%}
+.offer{display:flex;align-items:center;gap:8px;padding:7px 9px;background:var(--panel-2);
+  border:1px solid var(--line);border-radius:var(--r);font-size:12px}
+.offer .t{flex:1;font-family:var(--mono);font-size:11px}
+.offer button{padding:3px 9px;font-size:11px}
+.offer button.on{background:var(--good);border-color:var(--good);color:#0b0d10;font-weight:600}
+.offer button.off{background:var(--bad);border-color:var(--bad);color:#0b0d10;font-weight:600}
 
-        /* Turn indicator */
-        .turn-indicator { font-size: 1rem; font-weight: 700; color: var(--accent); margin-right: 12px; }
-        .status-badge { font-size: 0.75rem; padding: 3px 10px; border-radius: 10px; }
-        .status-badge.playing { background: var(--green); color: #000; }
-        .status-badge.finished { background: var(--muted); color: #000; }
+/* ─ tabs ─ */
+.tabs{display:flex;border-bottom:1px solid var(--line);flex:none}
+.tabs button{flex:1;border:0;border-radius:0;background:transparent;color:var(--muted);
+  padding:11px 4px;font-size:11px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;
+  border-bottom:2px solid transparent}
+.tabs button:hover{background:var(--panel-2)}
+.tabs button[aria-selected=true]{color:var(--text);border-bottom-color:var(--accent);background:transparent}
+.panels{flex:1;overflow-y:auto;padding:12px}
+.panel{display:none}
+.panel[data-on]{display:block}
+.empty{color:var(--dim);font-size:12px;padding:18px 4px;text-align:center}
 
-        /* Node colours for SVG */
-        .node-Red { fill: #e74c3c; }
-        .node-Blue { fill: #3498db; }
-        .node-Green { fill: #2ecc71; }
-        .node-Gold { fill: #f1c40f; }
-        .node-none { fill: #555; }
-        .node-circle { stroke: #fff; stroke-width: 2; cursor: pointer; }
-        .node-label { fill: #fff; font-size: 11px; font-weight: 700; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
-        .node-sc { fill: #fff; font-size: 8px; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
-        .edge-line { stroke: #333; stroke-width: 1.5; }
-        .move-arrow { stroke-width: 2.5; fill: none; marker-end: url(#arrowhead); }
-        .move-success { stroke: #2ecc71; }
-        .move-bounce { stroke: #e74c3c; stroke-dasharray: 6,4; }
-        .support-arrow { stroke: #3498db; stroke-width: 1.5; stroke-dasharray: 4,3; fill: none; marker-end: url(#arrowhead-blue); }
+/* ─ generic bits ─ */
+.card{background:var(--panel-2);border:1px solid var(--line);border-radius:var(--r);
+  padding:10px 11px;margin-bottom:9px}
+.card h4{font-size:12px;font-weight:600;margin-bottom:5px;display:flex;align-items:center;gap:6px}
+.card p{font-size:11.5px;color:var(--muted);line-height:1.55}
+.tag{font:10px/1 var(--mono);padding:3px 6px;border-radius:3px;border:1px solid var(--line);color:var(--muted)}
+.tag.broke{color:var(--bad);border-color:#43282a}
+.tag.kept{color:var(--good);border-color:#24402f}
+.tag.lie{color:var(--warn);border-color:#43371f}
+.mono{font-family:var(--mono);font-size:11px}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums}
 
-        .auto-label { font-size: 0.8rem; color: var(--muted); }
-    </style>
+table{width:100%;border-collapse:collapse;font-size:11px}
+th,td{padding:5px 7px;text-align:right;border-bottom:1px solid var(--line)}
+th{color:var(--muted);font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.05em}
+th:first-child,td:first-child{text-align:left}
+td.rel{font-family:var(--mono);font-variant-numeric:tabular-nums}
+
+.line{display:flex;gap:8px;padding:6px 2px;border-bottom:1px solid var(--line);font-size:11.5px;line-height:1.45}
+.line:last-child{border-bottom:0}
+.line .t{font:10px var(--mono);color:var(--dim);flex:none;padding-top:1px}
+.line.bad{color:var(--bad)}
+.line.good{color:var(--good)}
+.line.warn{color:var(--warn)}
+.line.mut{color:var(--muted)}
+
+.bar{height:4px;border-radius:2px;background:#1c222a;overflow:hidden;margin-top:4px}
+.bar i{display:block;height:100%;background:var(--accent)}
+</style>
 </head>
 <body>
 
-<div class="header">
-    <h1>🗺️ Territory Game — AI Dashboard</h1>
-    <div class="controls">
-        <span class="turn-indicator" id="turnLabel">No Game</span>
-        <span class="status-badge" id="statusBadge">—</span>
-        <button class="btn-primary" id="btnNew" onclick="newGame()">New Game</button>
-        <button class="btn-secondary" id="btnStep" onclick="stepGame()" disabled>Step →</button>
-        <label class="auto-label"><input type="checkbox" id="autoPlay"> Auto</label>
-        <button class="btn-secondary" id="btnRunAll" onclick="runAll()" disabled>Run All</button>
-    </div>
-</div>
+<header>
+  <h1>Territory <span>· negotiating agents that keep, and break, their word</span></h1>
+  <span class="pill" id="statusPill">no game</span>
+  <span class="pill" id="turnPill">—</span>
+  <div class="spacer"></div>
+  <div class="ctl">
+    <label for="seatSel">seat</label>
+    <select id="seatSel">
+      <option value="">spectate</option>
+      <option value="Red">play Red</option>
+      <option value="Blue">play Blue</option>
+      <option value="Green">play Green</option>
+      <option value="Gold">play Gold</option>
+    </select>
+    <label for="chaosSel">chaos</label>
+    <select id="chaosSel">
+      <option value="">none</option>
+      <option value="Red">Red</option><option value="Blue">Blue</option>
+      <option value="Green">Green</option><option value="Gold">Gold</option>
+    </select>
+    <label><input type="checkbox" id="bcastChk" checked> broadcasts</label>
+  </div>
+  <div class="ctl">
+    <button class="primary" id="btnNew">New game</button>
+    <button id="btnStep" disabled>Step</button>
+    <button id="btnRun" disabled>Run all</button>
+    <button id="btnSave" disabled>Save replay</button>
+  </div>
+</header>
 
-<div class="main">
-    <!-- Board panel -->
-    <div class="board-panel">
-        <svg id="boardSvg" viewBox="-60 -60 620 620" xmlns="http://www.w3.org/2000/svg">
-            <defs>
-                <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-                    <polygon points="0 0, 8 3, 0 6" fill="#2ecc71"/>
-                </marker>
-                <marker id="arrowhead-red" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-                    <polygon points="0 0, 8 3, 0 6" fill="#e74c3c"/>
-                </marker>
-                <marker id="arrowhead-blue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
-                    <polygon points="0 0, 8 3, 0 6" fill="#3498db"/>
-                </marker>
-            </defs>
-            <g id="edges"></g>
-            <g id="arrows"></g>
-            <g id="nodes"></g>
-        </svg>
-        <div class="scoreboard" id="scoreboard"></div>
+<main>
+  <section class="stage">
+    <div class="board">
+      <svg id="svg" viewBox="0 0 500 500" role="img" aria-label="Game board">
+        <defs>
+          <marker id="ah-ok" markerWidth="7" markerHeight="6" refX="6.5" refY="3" orient="auto">
+            <path d="M0 0 L7 3 L0 6 Z" fill="#5fb98b"/></marker>
+          <marker id="ah-no" markerWidth="7" markerHeight="6" refX="6.5" refY="3" orient="auto">
+            <path d="M0 0 L7 3 L0 6 Z" fill="#d4736f"/></marker>
+          <marker id="ah-sup" markerWidth="6" markerHeight="5" refX="5.5" refY="2.5" orient="auto">
+            <path d="M0 0 L6 2.5 L0 5 Z" fill="#6ea8fe"/></marker>
+        </defs>
+        <g id="gEdges"></g><g id="gArrows"></g><g id="gNodes"></g>
+      </svg>
     </div>
 
-    <!-- Sidebar -->
-    <div class="sidebar">
-        <div class="tabs">
-            <button class="tab active" onclick="switchTab('log')">Log</button>
-            <button class="tab" onclick="switchTab('trust')">Trust</button>
-            <button class="tab" onclick="switchTab('traces')">Traces</button>
-        </div>
-        <div class="tab-content">
-            <div id="tab-log" class="tab-panel active">
-                <div id="logEntries"><p style="color:var(--muted)">Start a new game to see events here.</p></div>
-            </div>
-            <div id="tab-trust" class="tab-panel">
-                <div id="trustMatrix"><p style="color:var(--muted)">Trust data appears after the first turn.</p></div>
-            </div>
-            <div id="tab-traces" class="tab-panel">
-                <div id="traceEntries"><p style="color:var(--muted)">Decision traces appear after each turn.</p></div>
-            </div>
-        </div>
+    <div class="scores" id="scores"></div>
+
+    <div class="scrub">
+      <span class="lbl" id="scrubLbl">turn — / —</span>
+      <input type="range" id="scrubber" min="0" max="0" value="0" disabled
+             aria-label="Replay scrubber">
+      <button id="btnLive" disabled>Live</button>
     </div>
-</div>
+
+    <div class="seat" id="seatPanel" hidden>
+      <h3 id="seatTitle">Your seat</h3>
+      <div class="body">
+        <div id="offers"></div>
+        <div id="orderForm"></div>
+      </div>
+    </div>
+  </section>
+
+  <aside>
+    <div class="tabs" role="tablist">
+      <button role="tab" data-tab="log" aria-selected="true">Log</button>
+      <button role="tab" data-tab="talks" aria-selected="false">Talks</button>
+      <button role="tab" data-tab="trust" aria-selected="false">Trust</button>
+      <button role="tab" data-tab="why" aria-selected="false">Why</button>
+      <button role="tab" data-tab="calib" aria-selected="false">Calib</button>
+    </div>
+    <div class="panels">
+      <div class="panel" id="p-log" data-on><div class="empty">Start a game.</div></div>
+      <div class="panel" id="p-talks"><div class="empty">Negotiation appears after the first turn.</div></div>
+      <div class="panel" id="p-trust"><div class="empty">Beliefs appear after the first turn.</div></div>
+      <div class="panel" id="p-why"><div class="empty">Decision traces appear after each turn.</div></div>
+      <div class="panel" id="p-calib"><div class="empty">Calibration needs a few graded promises.</div></div>
+    </div>
+  </aside>
+</main>
 
 <script>
-// ── Board layout ────────────────────────────────────────────────────────
-// Home ring clockwise from the north-west, plus four middle territories.
-// Mirrors src/engine/board.py -- change both together.
-const POSITIONS = {
-    R1: {x:112, y:112}, R2: {x:250, y:55},
-    B1: {x:388, y:112}, B2: {x:445, y:250},
-    G1: {x:388, y:388}, G2: {x:250, y:445},
-    Y1: {x:112, y:388}, Y2: {x:55,  y:250},
-    N1: {x:250, y:165}, N2: {x:250, y:335},
-    C1: {x:165, y:250}, C2: {x:335, y:250}
-};
-const ADJACENCY = {
-    R1:["R2","Y2","C1"], R2:["R1","B1","N1"],
-    B1:["R2","B2","N1"], B2:["B1","G1","C2"],
-    G1:["B2","G2","C2"], G2:["G1","Y1","N2"],
-    Y1:["G2","Y2","N2"], Y2:["Y1","R1","C1"],
-    N1:["R2","B1","C1","C2"], N2:["G2","Y1","C1","C2"],
-    C1:["R1","Y2","N1","N2"], C2:["B2","G1","N1","N2"]
-};
-const SUPPLY_CENTERS = new Set(["R1","R2","B1","B2","G1","G2","Y1","Y2","N1","N2"]);
-const PLAYER_COLORS = {Red:"#e74c3c", Blue:"#3498db", Green:"#2ecc71", Gold:"#f1c40f"};
+"use strict";
 
-let gameId = null;
-let autoTimer = null;
+// Layout only. Territories, adjacency and centres come from /api/board so the
+// page cannot silently disagree with the engine.
+const POS = {
+  R1:{x:130,y:130}, R2:{x:250,y:72},  B1:{x:370,y:130}, B2:{x:428,y:250},
+  G1:{x:370,y:370}, G2:{x:250,y:428}, Y1:{x:130,y:370}, Y2:{x:72,y:250},
+  N1:{x:250,y:178}, N2:{x:250,y:322}, C1:{x:178,y:250}, C2:{x:322,y:250}
+};
+const COLOR = {Red:"#d4605a", Blue:"#5b8fd6", Green:"#5aa878", Gold:"#c9a24a"};
+const $ = s => document.querySelector(s);
+const el = (t, cls, html) => { const n = document.createElement(t);
+  if (cls) n.className = cls; if (html != null) n.innerHTML = html; return n; };
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 
-// ── Draw static board edges ─────────────────────────────────────────────
+let BOARD = null;                 // static map data
+let game = null;                  // {id, human_seat, personas, ...}
+let history = [];                 // serialised turn records
+let viewing = -1;                 // index into history, -1 = live
+let running = false;
+let offerChoices = {};            // message id -> accept?
+
+// ── board ────────────────────────────────────────────────────────────
 function drawEdges() {
-    const g = document.getElementById('edges');
-    g.innerHTML = '';
-    const drawn = new Set();
-    for (const [node, neighbors] of Object.entries(ADJACENCY)) {
-        for (const n of neighbors) {
-            const key = [node, n].sort().join('-');
-            if (drawn.has(key)) continue;
-            drawn.add(key);
-            const line = document.createElementNS("http://www.w3.org/2000/svg","line");
-            line.setAttribute("x1", POSITIONS[node].x);
-            line.setAttribute("y1", POSITIONS[node].y);
-            line.setAttribute("x2", POSITIONS[n].x);
-            line.setAttribute("y2", POSITIONS[n].y);
-            line.setAttribute("class", "edge-line");
-            g.appendChild(line);
-        }
+  const g = $("#gEdges"); g.innerHTML = ""; const seen = new Set();
+  for (const [a, ns] of Object.entries(BOARD.adjacency))
+    for (const b of ns) {
+      const k = [a, b].sort().join("|"); if (seen.has(k)) continue; seen.add(k);
+      const l = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      l.setAttribute("x1", POS[a].x); l.setAttribute("y1", POS[a].y);
+      l.setAttribute("x2", POS[b].x); l.setAttribute("y2", POS[b].y);
+      l.setAttribute("class", "edge"); g.appendChild(l);
     }
 }
 
-// ── Draw nodes with ownership colours ───────────────────────────────────
-function drawNodes(state) {
-    const g = document.getElementById('nodes');
-    g.innerHTML = '';
-    const owners = state.territory_owners || {};
-    const centres = state.supply_centers || {};
-    const units = state.units || [];
-    const unitMap = {};
-    for (const u of units) unitMap[u.territory] = u.player;
+function drawBoard(state) {
+  const g = $("#gNodes"); g.innerHTML = "";
+  const centres = new Set(BOARD.supply_centers);
+  const unitAt = {}; for (const u of state.units || []) unitAt[u.territory] = u.player;
 
-    for (const [name, pos] of Object.entries(POSITIONS)) {
-        const owner = (SUPPLY_CENTERS.has(name) ? centres[name] : owners[name]) || null;
-        const color = owner ? (PLAYER_COLORS[owner] || "#555") : "#555";
-        const r = SUPPLY_CENTERS.has(name) ? 26 : 22;
+  for (const name of BOARD.territories) {
+    const p = POS[name]; if (!p) continue;
+    const isSc = centres.has(name);
+    const owner = isSc ? (state.supply_centers || {})[name] : (state.territory_owners || {})[name];
+    const r = isSc ? 25 : 20;
 
-        const circle = document.createElementNS("http://www.w3.org/2000/svg","circle");
-        circle.setAttribute("cx", pos.x);
-        circle.setAttribute("cy", pos.y);
-        circle.setAttribute("r", r);
-        circle.setAttribute("class", "node-circle");
-        circle.style.fill = color;
-        g.appendChild(circle);
+    const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    c.setAttribute("cx", p.x); c.setAttribute("cy", p.y); c.setAttribute("r", r);
+    c.setAttribute("class", "node" + (isSc ? " sc" : ""));
+    c.setAttribute("fill", owner ? COLOR[owner] : "#1a1f27");
+    c.setAttribute("fill-opacity", owner ? (unitAt[name] ? "1" : ".45") : "1");
+    c.setAttribute("stroke", isSc ? (owner ? COLOR[owner] : "#2a313b") : "#0b0d10");
+    g.appendChild(c);
+    c.appendChild(Object.assign(
+      document.createElementNS("http://www.w3.org/2000/svg", "title"),
+      {textContent: `${name}${isSc ? " (supply centre)" : ""}` +
+        (owner ? ` — ${owner}` : " — unowned") +
+        (unitAt[name] ? `, ${unitAt[name]} unit` : "")}));
 
-        // Label
-        const label = document.createElementNS("http://www.w3.org/2000/svg","text");
-        label.setAttribute("x", pos.x);
-        label.setAttribute("y", pos.y - (unitMap[name] ? 5 : 0));
-        label.setAttribute("class", "node-label");
-        label.textContent = name;
-        g.appendChild(label);
+    const t = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    t.setAttribute("x", p.x); t.setAttribute("y", unitAt[name] ? p.y - 5 : p.y);
+    t.setAttribute("class", "nlabel"); t.textContent = name; g.appendChild(t);
 
-        // Supply center star
-        if (SUPPLY_CENTERS.has(name)) {
-            const star = document.createElementNS("http://www.w3.org/2000/svg","text");
-            star.setAttribute("x", pos.x + r - 4);
-            star.setAttribute("y", pos.y - r + 6);
-            star.setAttribute("class", "node-sc");
-            star.textContent = "★";
-            g.appendChild(star);
-        }
-
-        // Unit marker
-        if (unitMap[name]) {
-            const ut = document.createElementNS("http://www.w3.org/2000/svg","text");
-            ut.setAttribute("x", pos.x);
-            ut.setAttribute("y", pos.y + 10);
-            ut.style.fill = "#fff";
-            ut.style.fontSize = "9px";
-            ut.style.fontWeight = "700";
-            ut.style.textAnchor = "middle";
-            ut.textContent = "⚔ " + unitMap[name][0];
-            g.appendChild(ut);
-        }
+    if (unitAt[name]) {
+      const u = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      u.setAttribute("x", p.x); u.setAttribute("y", p.y + 8);
+      u.setAttribute("class", "nunit"); u.textContent = "▲";
+      u.setAttribute("fill", "#0b0d10"); g.appendChild(u);
     }
+  }
 }
 
-// ── Draw move/support arrows ────────────────────────────────────────────
 function drawArrows(step) {
-    const g = document.getElementById('arrows');
-    g.innerHTML = '';
-    if (!step) return;
-    const logEvents = step.log || [];
-
-    for (const o of (step.orders || [])) {
-        if (o.order_type === "Move" && o.target && POSITIONS[o.unit_territory] && POSITIONS[o.target]) {
-            const success = logEvents.some(e => e.includes("Move succeeds: " + o.unit_territory));
-            const line = document.createElementNS("http://www.w3.org/2000/svg","line");
-            const src = POSITIONS[o.unit_territory];
-            const dst = POSITIONS[o.target];
-            // Offset slightly so arrows don't overlap edges
-            const dx = dst.x - src.x, dy = dst.y - src.y;
-            const len = Math.sqrt(dx*dx + dy*dy) || 1;
-            const shrink = 28;
-            line.setAttribute("x1", src.x + dx/len * shrink);
-            line.setAttribute("y1", src.y + dy/len * shrink);
-            line.setAttribute("x2", dst.x - dx/len * shrink);
-            line.setAttribute("y2", dst.y - dy/len * shrink);
-            line.setAttribute("class", "move-arrow " + (success ? "move-success" : "move-bounce"));
-            if (!success) line.setAttribute("marker-end", "url(#arrowhead-red)");
-            g.appendChild(line);
-        }
-        if (o.order_type === "Support" && o.target && POSITIONS[o.unit_territory] && POSITIONS[o.target]) {
-            const line = document.createElementNS("http://www.w3.org/2000/svg","line");
-            const src = POSITIONS[o.unit_territory];
-            const dst = POSITIONS[o.target];
-            const dx = dst.x - src.x, dy = dst.y - src.y;
-            const len = Math.sqrt(dx*dx + dy*dy) || 1;
-            const shrink = 28;
-            line.setAttribute("x1", src.x + dx/len * shrink);
-            line.setAttribute("y1", src.y + dy/len * shrink);
-            line.setAttribute("x2", dst.x - dx/len * shrink);
-            line.setAttribute("y2", dst.y - dy/len * shrink);
-            line.setAttribute("class", "support-arrow");
-            g.appendChild(line);
-        }
+  const g = $("#gArrows"); g.innerHTML = ""; if (!step) return;
+  const log = (step.log || []).join("\n");
+  for (const o of step.orders || []) {
+    const a = POS[o.unit_territory], b = POS[o.target];
+    if (!a || !b) continue;
+    if (o.order_type !== "Move" && o.order_type !== "Support") continue;
+    const dx = b.x - a.x, dy = b.y - a.y, len = Math.hypot(dx, dy) || 1, s = 28;
+    const l = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    l.setAttribute("x1", a.x + dx / len * s); l.setAttribute("y1", a.y + dy / len * s);
+    l.setAttribute("x2", b.x - dx / len * s); l.setAttribute("y2", b.y - dy / len * s);
+    if (o.order_type === "Support") {
+      l.setAttribute("class", "arrow sup"); l.setAttribute("marker-end", "url(#ah-sup)");
+    } else {
+      const ok = log.includes(`Move succeeds: ${o.unit_territory} ->`);
+      l.setAttribute("class", "arrow " + (ok ? "ok" : "no"));
+      l.setAttribute("marker-end", ok ? "url(#ah-ok)" : "url(#ah-no)");
     }
+    g.appendChild(l);
+  }
 }
 
-// ── Scoreboard ──────────────────────────────────────────────────────────
-function updateScoreboard(state) {
-    const sb = document.getElementById('scoreboard');
-    const counts = {Red:0, Blue:0, Green:0, Gold:0};
-    for (const [t, owner] of Object.entries(state.supply_centers || {})) {
-        if (owner) counts[owner] = (counts[owner]||0) + 1;
-    }
-    sb.innerHTML = '';
-    for (const [p, c] of Object.entries(counts)) {
-        const card = document.createElement('div');
-        card.className = 'score-card';
-        card.innerHTML = `<div class="name" style="color:${PLAYER_COLORS[p]}">${p}</div><div class="count">${c}</div><div style="font-size:0.7rem;color:var(--muted)">centres</div>`;
-        sb.appendChild(card);
-    }
+function drawScores(summary, state) {
+  // Scores are read off the state being *displayed*, not the live one, so
+  // scrubbing back to turn 3 does not show turn 9's centre counts.
+  const box = $("#scores"); box.innerHTML = "";
+  let counts = summary.scores || {};
+  if (state) {
+    counts = {};
+    for (const owner of Object.values(state.supply_centers || {}))
+      if (owner) counts[owner] = (counts[owner] || 0) + 1;
+  }
+  for (const p of BOARD.players) {
+    const n = counts[p] ?? 0;
+    const card = el("div", "score" + (game && game.human_seat === p ? " me" : ""));
+    card.innerHTML =
+      `<div class="who"><span class="dot" style="background:${COLOR[p]}"></span>${p}</div>
+       <div class="n">${n}</div>
+       <div class="sub">${esc((summary.personas || {})[p] || "")}${
+         game && game.human_seat === p ? " · you" : ""}</div>
+       <div class="bar"><i style="width:${Math.min(100, n / BOARD.win_centers * 100)}%;
+         background:${COLOR[p]}"></i></div>`;
+    box.appendChild(card);
+  }
 }
 
-// ── Log panel ───────────────────────────────────────────────────────────
-const logEl = document.getElementById('logEntries');
-function appendLog(turn, step) {
-    if (turn === 0) { logEl.innerHTML = ''; }
-    // Commitments
-    for (const o of (step.outcomes || [])) {
-        if (!o.kept) {
-            const d = document.createElement('div');
-            d.className = 'log-entry betrayal';
-            d.innerHTML = `<span class="turn-label">T${turn}</span> ⚠ BETRAYAL: ${o.commitment_type} between ${o.players.join(', ')} broken by ${o.broken_by.join(', ')}`;
-            logEl.prepend(d);
-        }
+// ── panels ───────────────────────────────────────────────────────────
+function renderLog(upto) {
+  const box = $("#p-log"); box.innerHTML = "";
+  const steps = history.slice(0, upto + 1);
+  if (!steps.length) { box.appendChild(el("div", "empty", "Nothing yet.")); return; }
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const s = steps[i], t = i + 1;
+    for (const o of s.outcomes || []) if (!o.kept)
+      box.appendChild(el("div", "line bad",
+        `<span class="t">T${t}</span><span>✕ ${esc(o.commitment_type)} between
+         ${esc(o.players.join(" & "))} broken by <b>${esc(o.broken_by.join(", "))}</b></span>`));
+    for (const e of [...(s.log || [])].reverse()) {
+      let cls = "line mut";
+      if (/Commitment created/.test(e)) cls = "line good";
+      else if (/BROADCAST|GOSSIP/.test(e)) cls = "line warn";
+      else if (/Dislodged|Removal/.test(e)) cls = "line bad";
+      else if (/Move succeeds|Build/.test(e)) cls = "line";
+      box.appendChild(el("div", cls, `<span class="t">T${t}</span><span>${esc(e)}</span>`));
     }
-    // Log events
-    for (const e of (step.log || [])) {
-        const d = document.createElement('div');
-        d.className = 'log-entry';
-        if (e.includes('GOSSIP') || e.includes('broadcasts')) d.className += ' gossip';
-        if (e.includes('Commitment created')) d.className += ' commitment';
-        d.innerHTML = `<span class="turn-label">T${turn}</span> ${e}`;
-        logEl.prepend(d);
-    }
+  }
 }
 
-// ── Traces panel ────────────────────────────────────────────────────────
-const tracesEl = document.getElementById('traceEntries');
-function updateTraces(turn, step) {
-    if (turn === 1) tracesEl.innerHTML = '';
-    for (const [player, trace] of Object.entries(step.traces || {})) {
-        if (!trace) continue;
-        const block = document.createElement('div');
-        block.className = 'trace-block';
-        const brokeHtml = trace.commitment_broken ? '<span class="broke"> [BROKE COMMITMENT]</span>' : '';
-        block.innerHTML = `<h4 style="color:${PLAYER_COLORS[player] || 'var(--text)'}">Turn ${turn} — ${player}${brokeHtml}</h4>
-            <p>${trace.explanation}</p>
-            <p>EV: ${trace.expected_value.toFixed(2)} | Penalty: ${trace.penalty.toFixed(2)}</p>`;
-        tracesEl.prepend(block);
+function renderTalks(upto) {
+  const box = $("#p-talks"); box.innerHTML = "";
+  const steps = history.slice(0, upto + 1);
+  const any = steps.some(s => (s.messages || []).length);
+  if (!any) { box.appendChild(el("div", "empty", "No messages yet.")); return; }
+
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const s = steps[i]; if (!(s.messages || []).length) continue;
+    const card = el("div", "card");
+    card.appendChild(el("h4", null,
+      `Turn ${i + 1} <span class="tag">${(s.messages || []).length} messages</span>`));
+    // Accepted deals first — they are the ones the engine will grade.
+    const accepted = new Set((s.messages || [])
+      .filter(m => m.type === "Accept").map(m => m.reference_id));
+    for (const m of s.messages) {
+      const who = COLOR[m.sender] || "var(--text)";
+      let cls = "line mut", note = "";
+      if (m.type === "Accept") cls = "line good";
+      else if (m.type === "Reject") cls = "line";
+      else if (m.type === "Counter") cls = "line warn";
+      else if (m.type === "Threat") cls = "line bad";
+      else if (m.type === "Broadcast") {
+        cls = m.verdict === "CONFIRMED" ? "line warn" : "line bad";
+        note = m.verdict === "REFUTED"
+          ? ` <span class="tag lie">refuted${m.truthful === false ? " · lie" : ""}</span>`
+          : ` <span class="tag kept">confirmed</span>`;
+      } else if (accepted.has(m.id)) note = ` <span class="tag kept">accepted</span>`;
+      const row = el("div", cls,
+        `<span class="t" style="color:${who}">■</span>
+         <span class="mono">${esc(m.text)}${note}</span>`);
+      card.appendChild(row);
     }
+    box.appendChild(card);
+  }
 }
 
-// ── Tab switching ───────────────────────────────────────────────────────
-function switchTab(name) {
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.tab-panel').forEach(t => t.classList.remove('active'));
-    event.target.classList.add('active');
-    document.getElementById('tab-' + name).classList.add('active');
+function renderTrust(upto) {
+  const box = $("#p-trust"); box.innerHTML = "";
+  const s = history[upto];
+  if (!s || !(s.beliefs || []).length) {
+    box.appendChild(el("div", "empty", "No beliefs recorded yet.")); return;
+  }
+  // observer -> subject -> type -> belief
+  const by = {};
+  for (const b of s.beliefs) (((by[b.observer] ??= {})[b.subject] ??= {}))[b.commitment_type] = b;
+
+  const types = [...new Set(s.beliefs.map(b => b.commitment_type))].sort();
+  for (const observer of BOARD.players) {
+    if (!by[observer]) continue;
+    const card = el("div", "card");
+    card.appendChild(el("h4", null,
+      `<span class="dot" style="background:${COLOR[observer]}"></span>${observer} believes`));
+    const tbl = el("table");
+    tbl.innerHTML = `<thead><tr><th>of</th>${types.map(t =>
+      `<th>${esc(t)}</th>`).join("")}</tr></thead>`;
+    const body = el("tbody");
+    for (const subject of BOARD.players) {
+      const row = by[observer][subject]; if (!row) continue;
+      const tds = types.map(t => {
+        const b = row[t];
+        if (!b) return `<td class="rel" style="color:var(--dim)">—</td>`;
+        const v = b.reliability;
+        const c = v > .66 ? "var(--good)" : v < .4 ? "var(--bad)" : "var(--warn)";
+        return `<td class="rel" style="color:${c}" title="Beta(${b.alpha}, ${b.beta})">
+                  ${v.toFixed(2)}</td>`;
+      }).join("");
+      body.innerHTML += `<tr><td>${subject === observer
+        ? `<b>self</b>` : esc(subject)}</td>${tds}</tr>`;
+    }
+    tbl.appendChild(body); card.appendChild(tbl); box.appendChild(card);
+  }
+  box.appendChild(el("p", "empty",
+    "Beta posterior mean per (observer, subject, promise type). Hover for α, β."));
 }
 
-// ── API calls ───────────────────────────────────────────────────────────
+function renderWhy(upto) {
+  const box = $("#p-why"); box.innerHTML = "";
+  const s = history[upto];
+  if (!s) { box.appendChild(el("div", "empty", "No turn selected.")); return; }
+  for (const [p, t] of Object.entries(s.traces || {})) {
+    if (!t) continue;
+    const card = el("div", "card");
+    card.appendChild(el("h4", null,
+      `<span class="dot" style="background:${COLOR[p]}"></span>${esc(p)}
+       ${t.commitment_broken ? '<span class="tag broke">broke a promise</span>' : ""}
+       ${t.vengeance ? `<span class="tag lie">revenge ${t.vengeance}</span>` : ""}`));
+    card.appendChild(el("p", null, esc(t.explanation)));
+    if ((t.penalty_rows || []).length) {
+      const tbl = el("table");
+      tbl.innerHTML = `<thead><tr><th>partner</th><th>Vcoop</th><th>ΔP</th>
+        <th>horizon</th><th>cost</th></tr></thead><tbody>` +
+        t.penalty_rows.map(r => `<tr><td>${esc(r.partner)}</td>
+          <td class="num">${r.vcoop.toFixed(2)}</td><td class="num">${r.delta_p.toFixed(3)}</td>
+          <td class="num">${r.horizon.toFixed(2)}</td>
+          <td class="num">${r.amount.toFixed(3)}</td></tr>`).join("") + "</tbody>";
+      card.appendChild(tbl);
+    }
+    card.appendChild(el("p", "mono",
+      `orders: ${(t.orders || []).map(o => o.order_type === "Hold"
+        ? `${o.unit_territory} H`
+        : o.order_type === "Move" ? `${o.unit_territory}→${o.target}`
+        : `${o.unit_territory} S ${o.supported_from ? o.supported_from + "→" : ""}${o.target}`
+      ).join(", ") || "—"}`));
+    card.appendChild(el("p", null,
+      `${t.search} · ${t.nodes} adjudications · ${t.candidates} candidates kept,
+       ${t.pruned} pruned by dominance`));
+    box.appendChild(card);
+  }
+  if (!box.children.length) box.appendChild(el("div", "empty", "No traces for this turn."));
+}
+
+function renderCalib(summary) {
+  const box = $("#p-calib"); box.innerHTML = "";
+  const bins = summary.reliability || [];
+  if (!bins.length) {
+    box.appendChild(el("div", "empty",
+      "Nothing graded yet — a promise has to be made and then tested."));
+    return;
+  }
+  const card = el("div", "card");
+  card.appendChild(el("h4", null, "Is P(keeps) worth anything?"));
+  card.appendChild(el("p", null, summary.brier == null ? "" :
+    `Brier ${summary.brier.toFixed(3)} — 0 is perfect, 0.25 is what you score by
+     saying 50% every time.`));
+  const tbl = el("table");
+  tbl.innerHTML = `<thead><tr><th>predicted</th><th>kept</th><th>n</th></tr></thead><tbody>` +
+    bins.map(b => {
+      const gap = Math.abs(b.mean_predicted - b.observed_rate);
+      const c = gap < .1 ? "var(--good)" : gap < .25 ? "var(--warn)" : "var(--bad)";
+      return `<tr><td class="num">${(b.bin_lower * 100).toFixed(0)}–${(b.bin_upper * 100).toFixed(0)}%</td>
+        <td class="num" style="color:${c}">${(b.observed_rate * 100).toFixed(0)}%</td>
+        <td class="num">${b.count}</td></tr>`;
+    }).join("") + "</tbody>";
+  card.appendChild(tbl);
+  box.appendChild(card);
+
+  const s = history[history.length - 1];
+  if (s && Object.keys(s.nodes || {}).length) {
+    const c2 = el("div", "card");
+    c2.appendChild(el("h4", null, "Search cost, last turn"));
+    const tbl2 = el("table");
+    tbl2.innerHTML = `<thead><tr><th>seat</th><th>adjudications</th></tr></thead><tbody>` +
+      Object.entries(s.nodes).map(([p, n]) =>
+        `<tr><td>${esc(p)}</td><td class="num">${n}</td></tr>`).join("") + "</tbody>";
+    c2.appendChild(tbl2); box.appendChild(c2);
+  }
+}
+
+// ── human seat ───────────────────────────────────────────────────────
+async function refreshSeat() {
+  const panel = $("#seatPanel");
+  if (!game || !game.human_seat || game.finished) { panel.hidden = true; return; }
+  panel.hidden = false;
+  $("#seatTitle").textContent = `Your seat — ${game.human_seat} (turn ${game.turn})`;
+
+  const r = await fetch(`/api/game/${game.id}/pending`);
+  const d = await r.json();
+
+  const offers = $("#offers"); offers.innerHTML = "";
+  offerChoices = {};
+  if (!d.proposals.length) offers.appendChild(el("div", "empty", "Nobody has offered you anything."));
+  for (const m of d.proposals) {
+    const row = el("div", "offer");
+    row.innerHTML = `<span class="dot" style="background:${COLOR[m.sender]}"></span>
+      <span class="t">${esc(m.text)}</span>`;
+    if (m.type === "Threat") { row.appendChild(el("span", "tag lie", "threat")); }
+    else {
+      const yes = el("button", null, "Accept"), no = el("button", null, "Reject");
+      const set = v => { offerChoices[m.id] = v;
+        yes.className = v ? "on" : ""; no.className = v ? "" : "off"; };
+      yes.onclick = () => set(true); no.onclick = () => set(false);
+      row.append(yes, no);
+    }
+    offers.appendChild(row);
+  }
+
+  const form = $("#orderForm"); form.innerHTML = "";
+  for (const [terr, opts] of Object.entries(d.legal)) {
+    const row = el("div", "orow");
+    row.appendChild(el("span", "u", terr));
+    const sel = el("select"); sel.dataset.terr = terr;
+    opts.forEach((o, i) => {
+      const opt = el("option", null, esc(o.label));
+      opt.value = i; sel.appendChild(opt);
+    });
+    sel.dataset.opts = JSON.stringify(opts);
+    row.appendChild(sel); form.appendChild(row);
+  }
+}
+
+function collectOrders() {
+  const out = [];
+  for (const sel of $("#orderForm").querySelectorAll("select")) {
+    const o = JSON.parse(sel.dataset.opts)[+sel.value];
+    out.push({unit_territory: sel.dataset.terr, order_type: o.order_type,
+              target: o.target, supported_from: o.supported_from});
+  }
+  return out;
+}
+
+// ── flow ─────────────────────────────────────────────────────────────
+function render(index) {
+  viewing = index;
+  const live = index >= history.length - 1;
+  const step = history[index];
+  // history[i].state is the board *before* turn i's orders, so what the turn
+  // produced is the next record's state, or the live one for the last turn.
+  const after = step ? (history[index + 1] ? history[index + 1].state : game.state)
+                     : game.state;
+  drawBoard(after);
+  drawArrows(step);
+  drawScores(game, after);
+  $("#scrubLbl").textContent = `turn ${index + 1} / ${history.length}`;
+  $("#scrubber").value = index;
+  $("#btnLive").disabled = live;
+  renderLog(index); renderTalks(index); renderTrust(index); renderWhy(index);
+  renderCalib(game);
+}
+
+function syncChrome() {
+  const on = !!game, done = on && game.finished;
+  $("#btnStep").disabled = !on || done || running;
+  $("#btnRun").disabled = !on || done || running;
+  $("#btnSave").disabled = !on || !history.length;
+  $("#scrubber").disabled = history.length < 2;
+  $("#scrubber").max = Math.max(0, history.length - 1);
+  $("#statusPill").textContent = !on ? "no game" : done
+    ? (game.winner ? `${game.winner} wins` : "finished") : "playing";
+  $("#statusPill").className = "pill " + (!on ? "" : done ? "done" : "live");
+  $("#turnPill").textContent = on
+    ? `turn ${Math.min(game.turn, game.max_turns)}/${game.max_turns} · ${game.win_centers} centres to win`
+    : "—";
+}
+
 async function newGame() {
-    const seed = Math.floor(Math.random() * 1000);
-    const res = await fetch(`/api/game/new?seed=${seed}`, {method:'POST'});
-    const data = await res.json();
-    gameId = data.game_id;
-    document.getElementById('btnStep').disabled = false;
-    document.getElementById('btnRunAll').disabled = false;
-    document.getElementById('turnLabel').textContent = 'Turn 1';
-    document.getElementById('statusBadge').textContent = 'Playing';
-    document.getElementById('statusBadge').className = 'status-badge playing';
-    logEl.innerHTML = '';
-    tracesEl.innerHTML = '';
-    drawNodes(data.state);
-    drawArrows(null);
-    updateScoreboard(data.state);
+  const body = {
+    human_seat: $("#seatSel").value || null,
+    chaos_seat: $("#chaosSel").value || null,
+    broadcast: $("#bcastChk").checked,
+  };
+  const r = await fetch("/api/game/new",
+    {method: "POST", headers: {"Content-Type": "application/json"},
+     body: JSON.stringify(body)});
+  const d = await r.json();
+  game = {...d, id: d.game_id};
+  history = []; viewing = -1;
+  drawBoard(game.state); drawArrows(null); drawScores(game, game.state);
+  for (const id of ["p-log", "p-talks", "p-trust", "p-why", "p-calib"])
+    $("#" + id).innerHTML = '<div class="empty">Step the game to populate this.</div>';
+  syncChrome();
+  await refreshSeat();
 }
 
-async function stepGame() {
-    if (!gameId) return;
-    const res = await fetch(`/api/game/${gameId}/step`, {method:'POST'});
-    const data = await res.json();
-    if (data.finished) {
-        document.getElementById('statusBadge').textContent = 'Finished';
-        document.getElementById('statusBadge').className = 'status-badge finished';
-        document.getElementById('btnStep').disabled = true;
-        document.getElementById('btnRunAll').disabled = true;
-        if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
-    }
-    document.getElementById('turnLabel').textContent = 'Turn ' + (data.turn || '?');
-    drawNodes(data.state);
-    drawArrows(data.step);
-    updateScoreboard(data.state);
-    appendLog(data.turn, data.step);
-    updateTraces(data.turn, data.step);
-    return data.finished;
+async function step() {
+  if (!game || game.finished) return false;
+  const payload = game.human_seat
+    ? {orders: collectOrders(), decisions: offerChoices}
+    : {orders: [], decisions: {}};
+  const r = await fetch(`/api/game/${game.id}/step`,
+    {method: "POST", headers: {"Content-Type": "application/json"},
+     body: JSON.stringify(payload)});
+  const d = await r.json();
+  if (d.step) history.push(d.step);
+  game = {...game, ...d};
+  syncChrome(); render(history.length - 1);
+  await refreshSeat();
+  return game.finished;
 }
 
 async function runAll() {
-    if (!gameId) return;
-    document.getElementById('btnRunAll').disabled = true;
-    for (let i = 0; i < 12; i++) {
-        const finished = await stepGame();
-        if (finished) break;
-        await new Promise(r => setTimeout(r, 400));
+  running = true; syncChrome();
+  try {
+    for (let i = 0; i < 40; i++) {
+      if (await step()) break;
+      await new Promise(r => setTimeout(r, 260));
     }
+  } finally { running = false; syncChrome(); }
 }
 
-// ── Auto-play toggle ────────────────────────────────────────────────────
-document.getElementById('autoPlay').addEventListener('change', function() {
-    if (this.checked) {
-        autoTimer = setInterval(async () => {
-            const done = await stepGame();
-            if (done) { clearInterval(autoTimer); autoTimer = null; document.getElementById('autoPlay').checked = false; }
-        }, 1000);
-    } else {
-        if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
-    }
+// ── wiring ───────────────────────────────────────────────────────────
+$("#btnNew").onclick = newGame;
+$("#btnStep").onclick = step;
+$("#btnRun").onclick = runAll;
+$("#btnLive").onclick = () => render(history.length - 1);
+$("#btnSave").onclick = async () => {
+  const r = await fetch(`/api/game/${game.id}/save`, {method: "POST"});
+  const d = await r.json();
+  $("#btnSave").textContent = "Saved ✓";
+  setTimeout(() => $("#btnSave").textContent = "Save replay", 1600);
+};
+$("#scrubber").oninput = e => render(+e.target.value);
+
+for (const b of document.querySelectorAll(".tabs button")) {
+  b.onclick = () => {
+    for (const o of document.querySelectorAll(".tabs button"))
+      o.setAttribute("aria-selected", String(o === b));
+    for (const p of document.querySelectorAll(".panel")) p.removeAttribute("data-on");
+    $("#p-" + b.dataset.tab).setAttribute("data-on", "");
+  };
+}
+
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
+  if (e.key === "ArrowLeft" && viewing > 0) render(viewing - 1);
+  if (e.key === "ArrowRight" && viewing < history.length - 1) render(viewing + 1);
+  if (e.key === " " && !$("#btnStep").disabled) { e.preventDefault(); step(); }
 });
 
-// ── Init ────────────────────────────────────────────────────────────────
-drawEdges();
-// Draw empty board
-drawNodes({territory_owners:{}, supply_centers:{}, units:[]});
-updateScoreboard({supply_centers:{}});
+(async function init() {
+  BOARD = await (await fetch("/api/board")).json();
+  drawEdges();
+  drawBoard({units: [], supply_centers: {}, territory_owners: {}});
+  drawScores({scores: {}, personas: {}}, null);
+  syncChrome();
+})();
 </script>
 </body>
 </html>

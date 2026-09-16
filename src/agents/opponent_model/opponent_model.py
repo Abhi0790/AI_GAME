@@ -125,37 +125,52 @@ class OpponentModel:
     # ------------------------------------------------------------------
     # Sampling
     # ------------------------------------------------------------------
+    def retaliation_rate(self, player: Player) -> float:
+        """How likely this player is to actually hit back, in [0, 1].
+
+        Used to price a THREAT: a player who moves is frightening, a player
+        who only talks is not.
+
+        ponytail: aggression is a proxy for follow-through. Track
+        threat-then-attack pairs directly if the deterrence figure needs it.
+        """
+        profile = self.profiles.get(player)
+        if profile is None or profile.total_orders == 0:
+            return 0.5
+        return min(1.0, profile.aggression_ratio)
+
     def sample_opponent_orders(
         self, state: GameState, samples: int = 3
     ) -> List[List[Order]]:
-        """Return *samples* joint-opponent order sets, weighted by profiles."""
-        opponents = [p for p in Player if p != self.my_player]
-        all_samples: List[List[Order]] = []
+        """Return *samples* joint-opponent order sets, weighted by profiles.
 
-        for _ in range(samples):
-            joint: List[Order] = []
-            for opp in opponents:
-                sets = generate_all_order_sets(state, opp)
-                if not sets:
-                    continue
-                profile = self.profiles[opp]
-                chosen = self._weighted_choice(sets, profile)
-                joint.extend(chosen)
-            all_samples.append(joint)
-        return all_samples
+        Weights are built once per opponent and then drawn from `samples`
+        times; scoring all 81 order sets inside the sample loop made 32
+        sampled worlds cost 32x more than it needed to.
+        """
+        opponents = [p for p in Player if p != self.my_player]
+        draws: Dict[Player, List[List[Order]]] = {}
+        for opp in opponents:
+            sets = generate_all_order_sets(state, opp)
+            if not sets:
+                continue
+            weights = self._weights(sets, self.profiles[opp])
+            draws[opp] = random.choices(sets, weights=weights, k=samples)
+
+        return [
+            [o for opp in opponents for o in draws.get(opp, [[]])[i]]
+            for i in range(samples)
+        ]
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
     @staticmethod
-    def _weighted_choice(
+    def _weights(
         order_sets: List[List[Order]], profile: OpponentProfile
-    ) -> List[Order]:
-        """Pick an order set with probability proportional to a score
-        derived from the opponent's observed tendencies."""
-        if not order_sets:
-            return []
-
+    ) -> List[float]:
+        """Score every order set by how much it looks like what this
+        opponent has actually been doing."""
         weights: List[float] = []
         agg = profile.aggression_ratio
 
@@ -171,9 +186,12 @@ class OpponentModel:
                 # HOLD is neutral — leave score as is
             weights.append(max(score, 0.01))
 
-        total = sum(weights)
-        probs = [w / total for w in weights]
+        return weights
 
-        # Use random.choices with weights
-        idx = random.choices(range(len(order_sets)), weights=probs, k=1)[0]
-        return order_sets[idx]
+    def _weighted_choice(
+        self, order_sets: List[List[Order]], profile: OpponentProfile
+    ) -> List[Order]:
+        """Single draw. Kept for callers that want one order set."""
+        if not order_sets:
+            return []
+        return random.choices(order_sets, weights=self._weights(order_sets, profile), k=1)[0]

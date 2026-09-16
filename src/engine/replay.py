@@ -12,7 +12,7 @@ from typing import List, Dict, Any, Optional
 
 from src.common.schemas import (
     GameState, Order, OrderType, Player, Unit, Commitment,
-    CommitmentType, UnitType,
+    CommitmentType, UnitType, describe_message,
 )
 
 
@@ -75,6 +75,45 @@ def _serialise_traces(traces: dict) -> dict:
     return out
 
 
+def _serialise_messages(messages: list) -> list:
+    return [
+        {
+            "id": m.id,
+            "sender": m.sender.value,
+            "receiver": m.receiver.value if m.receiver else None,
+            "message_type": m.message_type.value,
+            "commitment_type": m.commitment_type.value if m.commitment_type else None,
+            "turns": m.turns,
+            "target_territory": m.target_territory,
+            "supported_from": m.supported_from,
+            "dmz_territories": m.dmz_territories,
+            "reference_id": m.reference_id,
+            "condition": m.condition,
+            "action": m.action,
+            "broadcast_kind": m.broadcast_kind,
+            "broadcast_target": m.broadcast_target.value if m.broadcast_target else None,
+            "engine_verdict": m.engine_verdict,
+            "truthful": m.truthful,
+            "text": describe_message(m),
+        }
+        for m in messages
+    ]
+
+
+def _serialise_beliefs(beliefs: list) -> list:
+    return [
+        {
+            "observer": b.observer.value,
+            "subject": b.subject.value,
+            "commitment_type": b.commitment_type.value,
+            "alpha": b.alpha,
+            "beta": b.beta_param,
+            "reliability": b.expected_reliability,
+        }
+        for b in beliefs
+    ]
+
+
 def save_replay(
     history: list,
     final_state: GameState,
@@ -100,13 +139,16 @@ def save_replay(
 
     turns_data = []
     for step in history:
-        state, orders, outcomes, log, traces = step
         turns_data.append({
-            "state": _serialise_state(state),
-            "orders": _serialise_orders(orders),
-            "outcomes": _serialise_outcomes(outcomes),
-            "log": log.events,
-            "traces": _serialise_traces(traces),
+            "state": _serialise_state(step.state),
+            "orders": _serialise_orders(step.orders),
+            "outcomes": _serialise_outcomes(step.outcomes),
+            "log": step.log.events,
+            "traces": _serialise_traces(step.traces),
+            # Everything the negotiation and trust panels replay from. A
+            # replay that drops the messages cannot show why a deal existed.
+            "messages": _serialise_messages(step.messages),
+            "beliefs": _serialise_beliefs(step.beliefs),
         })
 
     replay = {

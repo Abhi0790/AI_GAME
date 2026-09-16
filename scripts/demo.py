@@ -39,7 +39,8 @@ def main():
     
     # Look for the turn where betrayal happened
     for i, step in enumerate(runner.history):
-        state, orders, outcomes, log, traces = step
+        state, orders, outcomes, log, traces = (
+            step.state, step.orders, step.outcomes, step.log, step.traces)
         broken = [o for o in outcomes if not o.kept]
         if broken:
             print(f"\n--- Turn {i+1}: Betrayal Detected! ---")

@@ -11,14 +11,26 @@ from src.evaluation.metrics import (
     supply_center_timeline,
     betrayal_events,
     betrayal_rate_per_player,
+    betrayal_rate_per_persona,
+    accusation_stats,
+    adjudications_per_turn,
+    turns_to_coalition,
     alliance_durations,
     final_scores,
     win_rates,
+    brier_score,
+    reliability_bins,
 )
 
 
-def print_game_summary(history: list, final_state: GameState):
-    """Print a formatted single-game summary to stdout."""
+def print_game_summary(history: list, final_state: GameState,
+                       personas: Dict[Player, str] = None,
+                       calibration: list = None):
+    """Print a formatted single-game summary to stdout.
+
+    *personas* turns seat colours into the thing the report actually compares.
+    "Red betrays more than Blue" says nothing on its own.
+    """
     print("\n" + "=" * 60)
     print("  GAME SUMMARY")
     print("=" * 60)
@@ -44,7 +56,39 @@ def print_game_summary(history: list, final_state: GameState):
     rates = betrayal_rate_per_player(history)
     print("\nBetrayal Rates:")
     for p in Player:
-        print(f"  {p.value:6s}: {rates[p]:.1%}")
+        label = f"{p.value} ({personas[p]})" if personas else p.value
+        print(f"  {label:24s}: {rates[p]:.1%}")
+
+    if personas:
+        print("\nBetrayal Rate by Persona:")
+        for name, rate in sorted(betrayal_rate_per_persona(history, personas).items()):
+            print(f"  {name:12s}: {rate:.1%}")
+
+        acc = accusation_stats(history, personas)
+        if acc["total"]:
+            print(f"\nAccusations: {acc['total']} made, {acc['confirmed']} confirmed by "
+                  f"the engine, {acc['refuted']} refuted ({acc['known_lies']} were lies)")
+            for name, row in sorted(acc["by_persona"].items()):
+                print(f"  {name:12s}: {row['made']} made, {row['refuted']} refuted")
+
+    nodes = adjudications_per_turn(history)
+    if any(nodes):
+        print(f"\nSearch cost: {sum(nodes)} adjudications, "
+              f"{sum(nodes) / max(1, len(nodes)):.0f} per turn")
+    coalition = turns_to_coalition(history)
+    print(f"First standing alliance: " +
+          (f"turn {coalition}" if coalition else "never formed"))
+
+    if calibration:
+        score = brier_score(calibration)
+        if score is not None:
+            graded = len([c for c in calibration if c.observed is not None])
+            print(f"\nP(keeps) calibration over {graded} graded promises: "
+                  f"Brier {score:.3f}  (0.25 = a coin flip)")
+            for b in reliability_bins(calibration, bins=5):
+                bar = "#" * round(b["observed_rate"] * 20)
+                print(f"  predicted {b['bin_lower']:.1f}-{b['bin_upper']:.1f} "
+                      f"(n={b['count']:>3}) -> kept {b['observed_rate']:.0%} {bar}")
 
     # Alliance durations
     alliances = alliance_durations(history)
@@ -73,6 +117,7 @@ def print_game_summary(history: list, final_state: GameState):
 def print_tournament_summary(
     game_results: List[Dict[Player, int]],
     all_histories: List[list],
+    personas: Dict[Player, str] = None,
 ):
     """Print cross-game tournament statistics."""
     print("\n" + "=" * 60)
@@ -98,7 +143,18 @@ def print_tournament_summary(
     print("\nAverage Betrayal Rates:")
     for p in Player:
         avg = sum(all_rates[p]) / max(1, len(all_rates[p]))
-        print(f"  {p.value:6s}: {avg:.1%}")
+        label = f"{p.value} ({personas[p]})" if personas else p.value
+        print(f"  {label:24s}: {avg:.1%}")
+
+    if personas:
+        pooled: Dict[str, List[float]] = {}
+        for history in all_histories:
+            for name, rate in betrayal_rate_per_persona(history, personas).items():
+                pooled.setdefault(name, []).append(rate)
+        print("\nBy Persona:")
+        for name, values in sorted(pooled.items()):
+            avg = sum(values) / len(values)
+            print(f"  {name:12s}: {avg:.1%}  {'#' * round(avg * 30)}")
 
     print("=" * 60)
 

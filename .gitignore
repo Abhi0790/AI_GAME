@@ -6,3 +6,10 @@ __pycache__/
 replays/
 data/
 experiments/
+
+# Generated report artefacts — reproduce with scripts/make_figures.py
+figures/
+
+# Only README.md is tracked. Everything else written in markdown stays local.
+*.md
+!README.md

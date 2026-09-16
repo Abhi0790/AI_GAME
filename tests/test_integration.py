@@ -66,7 +66,12 @@ class TestFullGame:
     def test_history_records_all_turns(self):
         runner = _run_game(seed=7)
         for step in runner.history:
-            assert len(step) == 5
+            # Messages and beliefs used to be produced and thrown away, which
+            # is why the UI had nothing to show for either.
+            assert step.state is not None
+            assert isinstance(step.messages, list)
+            assert isinstance(step.beliefs, list)
+            assert set(step.nodes) == set(Player)
 
     def test_different_seeds_produce_different_results(self):
         results = []
