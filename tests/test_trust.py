@@ -2,10 +2,11 @@
 
 import pytest
 from src.common.schemas import Player, CommitmentType, Commitment
+from src.engine.board import players
 from src.agents.trust.model import (
     TrustModel, TrustRecord, EVIDENCE_DECAY, p_keeps_given,
 )
-from src.agents.trust.rules import RuleEngine, OutcomeRule, GossipRule, TrustTrace
+from src.agents.trust.rules import RuleEngine, OutcomeRule
 from src.engine.adjudicator import CommitmentOutcome
 
 
@@ -95,16 +96,6 @@ class TestTrustModel:
         assert own.beta > 1.0
         assert m.reputation_drop(Player.RED, CommitmentType.ALLIANCE) > 0
 
-    def test_gossip_reduces_trust(self):
-        m = TrustModel(Player.RED)
-        # First make sender trusted
-        m.get_record(Player.GREEN, CommitmentType.ALLIANCE).alpha = 5.0
-        m.get_record(Player.GREEN, CommitmentType.ALLIANCE).beta = 1.0
-        # Apply gossip
-        m.apply_gossip(Player.GREEN, Player.BLUE, CommitmentType.ALLIANCE)
-        # BLUE's trust should decrease
-        assert m.get_reliability(Player.BLUE, CommitmentType.ALLIANCE) < 0.5
-
 
 # ── Rule Engine tests ────────────────────────────────────────────────────
 
@@ -140,31 +131,9 @@ class TestRuleEngine:
         assert len(blamed) == 1
         assert blamed[0].rule_name == "R2: Profitable Betrayal"
 
-    def test_gossip_rule_trusted_sender(self):
-        m = TrustModel(Player.RED)
-        m.get_record(Player.GREEN, CommitmentType.ALLIANCE).alpha = 5.0
-        m.get_record(Player.GREEN, CommitmentType.ALLIANCE).beta = 1.0
-        rule = GossipRule()
-        facts = {'gossip': {'sender': Player.GREEN, 'accused': Player.BLUE,
-                            'commitment_type': CommitmentType.ALLIANCE}}
-        traces = rule.evaluate(m, facts)
-        assert len(traces) == 1
-        assert traces[0].rule_name == "R3: Trusted Gossip"
-
-    def test_gossip_rule_untrusted_sender_ignored(self):
-        m = TrustModel(Player.RED)
-        # Sender has low trust
-        m.get_record(Player.GREEN, CommitmentType.ALLIANCE).alpha = 1.0
-        m.get_record(Player.GREEN, CommitmentType.ALLIANCE).beta = 5.0
-        rule = GossipRule()
-        facts = {'gossip': {'sender': Player.GREEN, 'accused': Player.BLUE,
-                            'commitment_type': CommitmentType.ALLIANCE}}
-        traces = rule.evaluate(m, facts)
-        assert len(traces) == 0  # Should be ignored
-
     def test_rule_engine_processes_all_rules(self):
         m = TrustModel(Player.RED)
-        engine = RuleEngine([OutcomeRule(), GossipRule()])
+        engine = RuleEngine([OutcomeRule()])
         c = Commitment(id="1", commitment_type=CommitmentType.ALLIANCE,
                        players=[Player.RED, Player.BLUE], valid_until_turn=5)
         outcome = CommitmentOutcome(commitment=c, kept=True, broken_by=[])
@@ -206,115 +175,9 @@ class TestTrustNetwork:
         """The trust panel was blank on turn one; a prior is still a belief."""
         m = TrustModel(Player.RED, prior_alpha=1.0, prior_beta=3.0)
         snap = m.snapshot()
-        assert len(snap) == len(Player) * len(CommitmentType)
+        # One row per seated player, not per colour on the roster.
+        assert len(snap) == len(players()) * len(CommitmentType)
         assert all(abs(b.expected_reliability - 0.25) < 1e-9 for b in snap)
-
-
-# ── Lying and the false-accusation rule (issue #9) ───────────────────────
-
-class TestFalseAccusation:
-    def _fire(self, verdict, owner=Player.RED, sender=Player.BLUE):
-        from src.agents.trust.rules import FalseAccusationRule
-        m = TrustModel(owner)
-        before = m.get_reliability(sender, CommitmentType.ALLIANCE)
-        traces = FalseAccusationRule().evaluate(m, {'gossip': {
-            'sender': sender, 'accused': Player.GREEN,
-            'commitment_type': CommitmentType.ALLIANCE, 'verdict': verdict}})
-        return m, before, traces
-
-    def test_a_refuted_accuser_loses_standing(self):
-        m, before, traces = self._fire("REFUTED")
-        assert traces
-        assert m.get_reliability(Player.BLUE, CommitmentType.ALLIANCE) < before
-
-    def test_a_confirmed_accuser_is_untouched(self):
-        m, before, traces = self._fire("CONFIRMED")
-        assert not traces
-        assert m.get_reliability(Player.BLUE, CommitmentType.ALLIANCE) == before
-
-    def test_the_hit_lands_on_every_kind_of_promise(self):
-        """What was observed is the liar, not the deal."""
-        m, _before, _t = self._fire("REFUTED")
-        for c_type in CommitmentType:
-            assert m.get_reliability(Player.BLUE, c_type) < 0.5
-
-    def test_a_liar_sees_their_own_reputation_fall(self):
-        """Otherwise nothing stops them lying again next turn."""
-        m, _b, traces = self._fire("REFUTED", owner=Player.BLUE, sender=Player.BLUE)
-        assert traces
-        assert m.get_reliability(Player.BLUE, CommitmentType.ALLIANCE) < 0.5
-
-    def test_a_refuted_claim_does_not_damage_the_accused(self):
-        from src.agents.trust.rules import GossipRule
-        m = TrustModel(Player.RED)
-        m.get_record(Player.BLUE, CommitmentType.ALLIANCE).alpha = 9.0  # trusted liar
-        before = m.get_reliability(Player.GREEN, CommitmentType.ALLIANCE)
-        GossipRule().evaluate(m, {'gossip': {
-            'sender': Player.BLUE, 'accused': Player.GREEN,
-            'commitment_type': CommitmentType.ALLIANCE, 'verdict': "REFUTED"}})
-        assert m.get_reliability(Player.GREEN, CommitmentType.ALLIANCE) == before
-
-
-class TestEngineVerifiesAccusations:
-    def _runner(self):
-        from src.engine.runner import GameRunner
-        from src.agents.agent import Agent
-        return GameRunner([Agent(p, "Honest") for p in Player])
-
-    def test_a_true_accusation_is_confirmed(self):
-        from src.common.schemas import (
-            Commitment, CommitmentOutcome, Message, MessageType,
-        )
-        c = Commitment(id="c", commitment_type=CommitmentType.ALLIANCE,
-                       players=[Player.RED, Player.BLUE], valid_until_turn=5)
-        outcome = CommitmentOutcome(commitment=c, kept=False, broken_by=[Player.BLUE])
-        msg = Message(id="m", sender=Player.RED, message_type=MessageType.BROADCAST,
-                      broadcast_kind="BETRAYED", broadcast_target=Player.BLUE,
-                      commitment_type=CommitmentType.ALLIANCE)
-        assert self._runner().verify_accusation(msg, [outcome]) == "CONFIRMED"
-
-    def test_a_kept_public_deal_refutes_the_accuser(self):
-        from src.common.schemas import Commitment, CommitmentOutcome, Message, MessageType
-        c = Commitment(id="c", commitment_type=CommitmentType.ALLIANCE,
-                       players=[Player.RED, Player.BLUE], valid_until_turn=5)
-        outcome = CommitmentOutcome(commitment=c, kept=True, broken_by=[])
-        msg = Message(id="m", sender=Player.RED, message_type=MessageType.BROADCAST,
-                      broadcast_kind="BETRAYED", broadcast_target=Player.BLUE,
-                      commitment_type=CommitmentType.ALLIANCE)
-        assert self._runner().verify_accusation(msg, [outcome]) == "REFUTED"
-
-    def test_an_invented_betrayal_cannot_be_settled(self):
-        """With no public deal between them the engine has nothing to check
-        against, so the claim stands or falls on the accuser's reputation.
-        That ambiguity is what gives lying an expected value."""
-        from src.common.schemas import Message, MessageType
-        msg = Message(id="m", sender=Player.RED, message_type=MessageType.BROADCAST,
-                      broadcast_kind="BETRAYED", broadcast_target=Player.GREEN,
-                      commitment_type=CommitmentType.ALLIANCE)
-        assert self._runner().verify_accusation(msg, []) == "UNVERIFIED"
-
-    def test_a_broken_private_deal_is_not_published(self):
-        """The engine graded it, but saying so would make every private deal
-        public the moment it was broken."""
-        from src.common.schemas import Commitment, CommitmentOutcome, Message, MessageType
-        c = Commitment(id="c", commitment_type=CommitmentType.ALLIANCE,
-                       players=[Player.RED, Player.BLUE], valid_until_turn=5,
-                       private=True)
-        outcome = CommitmentOutcome(commitment=c, kept=False, broken_by=[Player.BLUE])
-        msg = Message(id="m", sender=Player.RED, message_type=MessageType.BROADCAST,
-                      broadcast_kind="BETRAYED", broadcast_target=Player.BLUE,
-                      commitment_type=CommitmentType.ALLIANCE)
-        assert self._runner().verify_accusation(msg, [outcome]) == "UNVERIFIED"
-
-    def test_accusing_over_a_deal_you_were_not_in_is_unverifiable(self):
-        from src.common.schemas import Commitment, CommitmentOutcome, Message, MessageType
-        c = Commitment(id="c", commitment_type=CommitmentType.ALLIANCE,
-                       players=[Player.GREEN, Player.BLUE], valid_until_turn=5)
-        outcome = CommitmentOutcome(commitment=c, kept=False, broken_by=[Player.BLUE])
-        msg = Message(id="m", sender=Player.RED, message_type=MessageType.BROADCAST,
-                      broadcast_kind="BETRAYED", broadcast_target=Player.BLUE,
-                      commitment_type=CommitmentType.ALLIANCE)
-        assert self._runner().verify_accusation(msg, [outcome]) == "UNVERIFIED"
 
 
 # ── Calibration (issue #8) ───────────────────────────────────────────────
@@ -351,3 +214,16 @@ class TestCalibration:
                                 predicted=0.0, observed=False)]
         assert brier_score(pts) == 0.0
         assert calibration_error(pts) == 0.0
+
+
+def test_fitted_cpt_can_still_refuse_a_betrayer():
+    """Mostly-kept data pulls the fit toward a high floor; the constraint keeps a
+    partner who broke three promises in a row below even odds."""
+    from types import SimpleNamespace
+    from src.evaluation.sweep import fit_cpt, allows_distrust
+    rows = [SimpleNamespace(reliability=r / 10, incentive=0.0, observed=(i % 10 != 0), game=i % 7)
+            for i in range(700) for r in [i % 10]]
+    unconstrained = fit_cpt(rows, distrust=False)
+    constrained = fit_cpt(rows)
+    assert not allows_distrust(*unconstrained[:3])
+    assert allows_distrust(*constrained[:3])

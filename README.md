@@ -53,14 +53,33 @@ npm --prefix web run dev                     # or Vite on :5173, proxying the AP
 python scripts/demo.py                       # betrayal demo, arithmetic printed
 python scripts/run_headless.py --seed 42     # one game, no UI
 python scripts/play.py --seat Red            # play a seat in the terminal
-python scripts/run_analysis.py --games 10    # metrics per persona
-python scripts/run_tournament.py             # multi-game tournament
-python scripts/make_figures.py --games 8     # report figures -> figures/
-python scripts/run_sweep.py --seeds 5        # fit constants -> data/sweep.json
+python scripts/run_analysis.py --games 20    # metrics per persona, with CIs
+python scripts/run_tournament.py --games 20  # multi-game tournament
+python scripts/make_figures.py --games 20    # report figures -> figures/
+python scripts/run_sweep.py --seeds 20       # sweep the knobs -> data/sweep.json
 pytest tests/ -q
 ```
 
-In the dashboard: **New game** to start, **seat** to play one yourself,
+Every run is built from one `GameConfig` (`src/common/config.py`) and played
+through `harness.play()`, so a result can be reproduced from the config the
+run prints. Personas rotate one seat per seed unless a seating is given, and
+any tuning constant can be overridden by name:
+
+```bash
+python scripts/run_headless.py --seed 42 --knob FORFEIT_WEIGHT=0
+python scripts/run_sweep.py --seeds 20 --axes LAMBDA_INCENTIVE=0.2,0.6
+```
+
+Multi-game scripts (analysis, tournament, figures, sweep) play games in parallel
+through `harness.play_many()`. Each game is deterministic in its seed, so the
+results match a serial run. The worker count is one per spare core, capped so
+the workers fit in half the memory available when the run starts (inside Docker, what the container limit leaves) at
+512 MB each; set `GAME_WORKERS=N` to override it, and `GAME_WORKERS=1` to run
+serially.
+
+In the dashboard: **New game** opens a form for seed, persona per seat,
+search, budget and negotiation rounds, and the effective config
+is shown so a screenshot is reproducible. **seat** to play one yourself,
 **chaos** to seat a deliberately malfunctioning player. The slider replays
 turns already played; left/right arrows step, space advances.
 
@@ -78,8 +97,10 @@ set dominance pruning removed, and each surviving order set with its
 ```
 src/
   common/schemas.py               shared types, negotiation grammar + validator
+  common/config.py                GameConfig - seed, seating, search, knobs
+  harness.py                      play(cfg) - the one way a game is built
   engine/
-    board.py                      12 territories, 10 supply centres, adjacency
+    board.py                      Board + ring_board(n) - map, seats, win condition
     orders.py                     legal order enumeration
     adjudicator.py                simultaneous resolution, commitment grading
     runner.py                     step() - the turn loop
@@ -88,7 +109,7 @@ src/
     agent.py                      Agent, HumanAgent
     chaos.py                      ChaosAgent - six misbehaviour modes
     trust/model.py                Beta records, P(keeps) network
-    trust/rules.py                rule base R0-R4
+    trust/rules.py                rule base R0-R2, R5
     planner/planner.py            expectiminimax, MCTS, pruning, pricing
     negotiation/strategy.py       deal valuation, proposals, replies
     negotiation/personas.py       four personas
@@ -114,12 +135,29 @@ Dockerfile                        four images: web, sim, test, report
 
 ## Rules
 
-12 territories, 10 supply centres, 4 players, 2 units each. Orders are move,
-support move, support hold and hold, submitted simultaneously. Attack strength
-is 1 plus supports and must strictly exceed the defence; equal strength bounces
-and supports can be cut. Odd turns are spring, even turns autumn, when centres
-change hands and units are built or removed. A game ends when someone holds 5
-centres, or after 12 turns.
+By default: 12 territories, 10 supply centres, 4 players, 2 units each. Orders
+are move, support move, support hold and hold, submitted simultaneously. Attack
+strength is 1 plus supports and must strictly exceed the defence; equal strength
+bounces and supports can be cut. Odd turns are spring, even turns autumn, when
+centres change hands and units are built or removed. New units go only on the
+player's own empty home centres, as in standard Diplomacy; `--build-anywhere`
+(or unticking the dashboard's "home builds" box) allows any owned centre. A
+game ends when someone holds 5 centres, or after 12 turns.
+
+None of those numbers are fixed. Every script takes `--seats` (2–8), `--homes`
+(home centres, and so units, per player), `--win-centers`, `--win-fraction` (the
+share of the board's centres that wins when `--win-centers` is not given, 0.5 by
+default) and `--max-turns`, and
+the dashboard has the same controls; the map is generated to match and is proved
+symmetric before it is played on. The default is exactly the board above.
+
+```bash
+python scripts/run_headless.py --seats 6 --max-turns 20
+python scripts/play.py --seat Purple --seats 6
+```
+
+For a map that is not a ring, pass `GameConfig(board=...)` an explicit
+`Board.to_dict()` — see `tests/test_board_config.py`.
 
 Promises come in four kinds — alliance, DMZ, support, and an exchange whose
 two legs fall due on different turns. Any of them can be private, and an

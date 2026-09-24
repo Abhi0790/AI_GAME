@@ -15,8 +15,9 @@ import random
 from src.common.schemas import (
     Player, GameState, Order, OrderType, Commitment, CommitmentType
 )
-from src.engine.board import get_adjacent, get_all_territories
+from src.engine.board import get_adjacent, get_all_territories, players
 from src.engine.orders import generate_all_order_sets
+from src.engine.adjudicator import verify_commitments
 
 
 class OpponentProfile:
@@ -100,8 +101,11 @@ class OpponentModel:
     def __init__(self, my_player: Player):
         self.my_player = my_player
         self.profiles: Dict[Player, OpponentProfile] = {
-            p: OpponentProfile(p) for p in Player if p != my_player
+            p: OpponentProfile(p) for p in players() if p != my_player
         }
+        # (board, opponent, their deals) -> which of their order sets break a
+        # promise. Recomputed once per position rather than per playout.
+        self._break_mask: Dict[tuple, List[bool]] = {}
 
     # ------------------------------------------------------------------
     # Observation API
@@ -139,22 +143,73 @@ class OpponentModel:
             return 0.5
         return min(1.0, profile.aggression_ratio)
 
+    def _breaks(self, state: GameState, opp: Player, sets: List[List[Order]],
+                deals: List[Commitment]) -> List[bool]:
+        """Which of this opponent's order sets break one of their promises."""
+        key = (state.turn,
+               tuple(sorted((u.territory, u.player.value) for u in state.units)),
+               tuple(sorted((t, o.value) for t, o in state.supply_centers.items() if o)),
+               opp, tuple(sorted(c.id for c in deals)))
+        hit = self._break_mask.get(key)
+        if hit is None:
+            hit = [any(not o.kept and opp in o.broken_by
+                       for o in verify_commitments(state, deals, s))
+                   for s in sets]
+            if len(self._break_mask) > 256:
+                self._break_mask.clear()
+            self._break_mask[key] = hit
+        return hit
+
     def sample_opponent_orders(
-        self, state: GameState, samples: int = 3
+        self, state: GameState, samples: int = 3,
+        commitments: Optional[List[Commitment]] = None, trust_model=None,
+        incentives: Optional[Dict[Player, float]] = None,
     ) -> List[List[Order]]:
         """Return *samples* joint-opponent order sets, weighted by profiles.
 
         Weights are built once per opponent and then drawn from `samples`
         times; scoring all 81 order sets inside the sample loop made 32
         sampled worlds cost 32x more than it needed to.
+
+        With *commitments* and a *trust_model*, the draw is also conditioned on
+        what the opponent has promised: order sets that honour their live deals
+        are weighted by P(they keep), the rest by 1 - P(they keep). Without
+        this the planner predicted exactly the same behaviour from a partner
+        whether or not a deal existed, so a promise could only ever appear as a
+        penalty on my own orders and never as a reason to expect theirs to
+        change. Reciprocity becomes a belief instead of a fine.
         """
-        opponents = [p for p in Player if p != self.my_player]
+        opponents = [p for p in players() if p != self.my_player]
         draws: Dict[Player, List[List[Order]]] = {}
         for opp in opponents:
             sets = generate_all_order_sets(state, opp)
             if not sets:
                 continue
             weights = self._weights(sets, self.profiles[opp])
+
+            deals = [c for c in (commitments or []) if opp in c.players]
+            if deals and trust_model is not None:
+                # One P(keeps) for the player, averaged over their live deals:
+                # the draw is over whole order sets, and a set that breaks
+                # anything is already off the honouring branch.
+                #
+                # ponytail: one averaged probability and a binary
+                # honours/breaks split. Weight each set by the product over the
+                # specific deals it breaks if partial defection (keep the DMZ,
+                # drop the support) turns out to matter.
+                iota = (incentives or {}).get(opp, 0.0)
+                p_keep = sum(trust_model.p_keeps(opp, c.commitment_type, iota,
+                                                 toward=self.my_player)
+                             for c in deals) / len(deals)
+                # Each branch is normalised, so the draw breaks with probability
+                # 1 - P(keeps) however many order sets fall on either side.
+                breaks = self._breaks(state, opp, sets, deals)
+                w_break = sum(w for w, b in zip(weights, breaks) if b)
+                w_keep = sum(weights) - w_break
+                if w_break and w_keep:
+                    weights = [w * ((1.0 - p_keep) / w_break if b else p_keep / w_keep)
+                               for w, b in zip(weights, breaks)]
+
             draws[opp] = random.choices(sets, weights=weights, k=samples)
 
         return [

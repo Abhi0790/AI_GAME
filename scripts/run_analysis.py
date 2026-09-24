@@ -5,13 +5,11 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
-import random
 
-from src.common.schemas import Player
-from src.agents.agent import Agent
-from src.engine.runner import GameRunner
+from src.common.config import GameConfig, add_board_args, board_kwargs
+from src.harness import game_setup, play_many
 from src.engine.replay import save_replay
-from src.evaluation.metrics import final_scores
+from src.evaluation.metrics import MIN_GAMES, final_scores
 from src.evaluation.analysis import (
     print_game_summary, print_tournament_summary, export_game_data,
 )
@@ -19,48 +17,48 @@ from src.evaluation.analysis import (
 
 def main():
     parser = argparse.ArgumentParser(description="Run games and analyse results")
-    parser.add_argument("--games", type=int, default=5, help="Number of games")
+    parser.add_argument("--games", type=int, default=MIN_GAMES,
+                        help=f"Number of games (below {MIN_GAMES} is not reportable)")
     parser.add_argument("--seed", type=int, default=0, help="Starting seed")
     parser.add_argument("--export", type=str, default=None,
                         help="Directory to export JSON data")
     parser.add_argument("--save-replays", action="store_true",
                         help="Save replay files")
+    add_board_args(parser)
     args = parser.parse_args()
 
     all_results = []
     all_histories = []
+    all_personas = []
 
-    for i in range(args.games):
-        seed = args.seed + i
-        random.seed(seed)
+    cfgs = [GameConfig(seed=args.seed + i, **board_kwargs(args)) for i in range(args.games)]
+    for i, (cfg, runner) in enumerate(zip(cfgs, play_many(cfgs))):
+        seed = cfg.seed
         print(f"\n{'='*40}")
         print(f"  Game {i+1}/{args.games}  (seed={seed})")
         print(f"{'='*40}")
 
-        agents = [
-            Agent(Player.RED, "Opportunist"),
-            Agent(Player.BLUE, "Honest"),
-            Agent(Player.GREEN, "Paranoid"),
-            Agent(Player.GOLD, "Vengeful"),
-        ]
-        runner = GameRunner(agents)
-        runner.run()
+        # Personas rotate one seat per seed, so the per-persona tables below
+        # are not measuring the colour.
         personas = runner.personas()
+        all_personas.append(personas)
 
-        scores = final_scores(runner.state)
-        all_results.append(scores)
-        all_histories.append(runner.history)
+        # The metrics read the seat list off the board.
+        with game_setup(cfg):
+            all_results.append(final_scores(runner.state))
+            all_histories.append(runner.history)
 
-        print_game_summary(runner.history, runner.state,
-                           runner.personas(), runner.calibration)
+            print_game_summary(runner.history, runner.state,
+                               personas, runner.calibration, runner.reversals)
 
-        if args.save_replays:
-            path = save_replay(
-                runner.history, runner.state,
-                directory="replays",
-                filename=f"game_{seed}.json",
-            )
-            print(f"Replay saved: {path}")
+            if args.save_replays:
+                path = save_replay(
+                    runner.history, runner.state,
+                    directory="replays",
+                    filename=f"game_{seed}.json",
+                    board=cfg.make_board().to_dict(),
+                )
+                print(f"Replay saved: {path}")
 
         if args.export:
             export_game_data(
@@ -69,7 +67,8 @@ def main():
             )
 
     if args.games > 1:
-        print_tournament_summary(all_results, all_histories, personas)
+        with game_setup(GameConfig(**board_kwargs(args))):
+            print_tournament_summary(all_results, all_histories, all_personas)
 
 
 if __name__ == "__main__":

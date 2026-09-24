@@ -5,7 +5,7 @@
 This used to carry its own HumanAgent with no trust model, no beliefs and no
 decision trace — a second, slowly diverging copy of the one in
 src/agents/agent.py. It now wraps the shared one and only adds the prompting,
-so the CLI seat learns, is gossiped about and can see its own beliefs exactly
+so the CLI seat learns and can see its own beliefs exactly
 like the web seat does.
 """
 
@@ -14,15 +14,15 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
-import random
 
+from src.common.config import GameConfig, add_board_args, board_kwargs, seating_for
+from src.harness import build_runner, game_setup
 from src.common.schemas import (
     Player, Order, OrderType, MessageType, CommitmentType, describe_message,
 )
-from src.agents.agent import Agent, HumanAgent
-from src.engine.runner import GameRunner
+from src.agents.agent import HumanAgent
 from src.engine.orders import generate_orders_for_unit
-from src.engine.board import WIN_CENTERS
+from src.engine.board import players, win_centers
 
 BAR = "─" * 62
 
@@ -93,7 +93,7 @@ def show_beliefs(agent):
     print(f"\n  your beliefs — P(keeps), Beta posterior mean")
     types = list(CommitmentType)
     print("    " + "subject".ljust(9) + "".join(t.value.rjust(11) for t in types))
-    for subject in Player:
+    for subject in players():
         if subject == agent.player:
             continue
         row = "".join(f"{agent.trust_model.get_reliability(subject, t):>11.2f}"
@@ -104,22 +104,30 @@ def show_beliefs(agent):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seat", default="Red", choices=[p.value for p in Player])
-    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--seed", type=int, default=0)
+    add_board_args(ap)
     args = ap.parse_args()
-    if args.seed is not None:
-        random.seed(args.seed)
 
     seat = Player(args.seat)
-    personas = {Player.RED: "Opportunist", Player.BLUE: "Honest",
-                Player.GREEN: "Paranoid", Player.GOLD: "Vengeful"}
-    agents = [CLIHuman(p, personas[p]) if p == seat else Agent(p, personas[p])
-              for p in Player]
-    you = next(a for a in agents if a.player == seat)
-    runner = GameRunner(agents)
+    # Fixed seating: a human should be told who everyone is once.
+    cfg = GameConfig(seed=args.seed, human_seat=seat, **board_kwargs(args))
+    cfg.seating = seating_for(0, cfg.make_board().players)
+    if seat not in cfg.seating:
+        ap.error(f"{seat.value} is not seated in a {args.seats}-player game; "
+                 f"pick one of {', '.join(p.value for p in cfg.seating)}")
 
-    print(f"\n{BAR}\n  You are {seat.value}. First to {WIN_CENTERS} supply centres wins;"
-          f"\n  otherwise most centres after {runner.max_turns} turns.\n{BAR}")
+    with game_setup(cfg):
+        runner = build_runner(cfg)
+        # The harness seats the shared HumanAgent; swap in the prompting one.
+        you = CLIHuman(seat, cfg.seats()[seat])
+        runner.agents[seat] = you
+        print(f"\n{BAR}\n  You are {seat.value}. First to {win_centers()} supply "
+              f"centres wins;\n  otherwise most centres after {runner.max_turns} "
+              f"turns.\n{BAR}")
+        _play(runner, you, seat)
 
+
+def _play(runner, you, seat):
     while runner.state.turn <= runner.max_turns:
         record = runner.step()
         counts = runner.center_counts()
@@ -133,9 +141,14 @@ def main():
 
     champion = runner.winner()
     counts = runner.center_counts()
-    final = champion or max(counts, key=lambda p: counts[p])
-    print(f"\n{BAR}\n  {final.value} wins with {counts[final]} centres."
-          f"{'  (that was you)' if final == seat else ''}\n{BAR}")
+    ahead = runner.leaders()
+    if champion:
+        result = f"{champion.value} wins with {counts[champion]} centres."
+    else:
+        result = (f"Shared lead on {counts[ahead[0]]} centres: "
+                  f"{', '.join(sorted(p.value for p in ahead))}.")
+    print(f"\n{BAR}\n  {result}"
+          f"{'  (that was you)' if seat in ahead else ''}\n{BAR}")
     brier = runner.brier_score()
     if brier is not None:
         print(f"  Everyone's P(keeps) scored a Brier of {brier:.3f} this game "

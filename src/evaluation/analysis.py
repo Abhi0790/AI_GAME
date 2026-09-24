@@ -6,16 +6,16 @@ import json
 import os
 from typing import List, Dict, Any
 
-from src.common.schemas import Player, GameState
+from src.engine.board import players
+from src.common.schemas import Player, GameState, leaders
 from src.evaluation.metrics import (
     deal_mix,
-    privacy_and_lying,
     pair_trust_divergence,
     supply_center_timeline,
     betrayal_events,
     betrayal_rate_per_player,
-    betrayal_rate_per_persona,
-    accusation_stats,
+    obligations,
+    preference_reversals,
     adjudications_per_turn,
     turns_to_coalition,
     alliance_durations,
@@ -23,12 +23,31 @@ from src.evaluation.metrics import (
     win_rates,
     brier_score,
     reliability_bins,
+    MIN_GAMES,
+    fmt_rate,
+    fmt_mean,
 )
+
+
+def _betrayal_counts(history: list, personas: Dict[Player, str] = None
+                     ) -> Dict[str, List[int]]:
+    """{persona: [broken, obligated]} — the counts behind the rate, which is
+    what an interval needs. Counted per (turn, partner) by `obligations`, the
+    same unit `betrayal_rate_per_persona` uses."""
+    counts: Dict[str, List[int]] = {}
+    if not personas:
+        return counts
+    for step in history:
+        for (p, _q), broke in obligations(step).items():
+            row = counts.setdefault(personas.get(p, "Unknown"), [0, 0])
+            row[1] += 1
+            row[0] += broke
+    return counts
 
 
 def print_game_summary(history: list, final_state: GameState,
                        personas: Dict[Player, str] = None,
-                       calibration: list = None):
+                       calibration: list = None, reversals: list = None):
     """Print a formatted single-game summary to stdout.
 
     *personas* turns seat colours into the thing the report actually compares.
@@ -41,12 +60,13 @@ def print_game_summary(history: list, final_state: GameState,
     # Final scores
     scores = final_scores(final_state)
     print("\nFinal Supply Center Counts:")
-    for p in Player:
+    for p in players():
         bar = "█" * scores[p]
         print(f"  {p.value:6s}: {scores[p]}  {bar}")
 
-    winner = max(scores, key=scores.get)
-    print(f"\n  Winner: {winner.value}")
+    ahead = leaders(scores)
+    print("\n  Winner: " + (ahead[0].value if len(ahead) == 1
+                            else "shared — " + ", ".join(sorted(p.value for p in ahead))))
 
     # Betrayals
     betrayals = betrayal_events(history)
@@ -55,41 +75,28 @@ def print_game_summary(history: list, final_state: GameState,
         print(f"  Turn {b['turn']}: {b['commitment_type']} between "
               f"{b['players']} broken by {b['broken_by']}")
 
-    # Betrayal rates
+    # Betrayal rates. Keyed by Player for the seat colour, and by persona for
+    # everything the report actually compares — the persona table is the one
+    # to read, the colour one is a sanity check.
+    counts = _betrayal_counts(history, personas)
+    print("\nBetrayal Rates by seat:")
     rates = betrayal_rate_per_player(history)
-    print("\nBetrayal Rates:")
-    for p in Player:
+    for p in players():
         label = f"{p.value} ({personas[p]})" if personas else p.value
         print(f"  {label:24s}: {rates[p]:.1%}")
 
     if personas:
         print("\nBetrayal Rate by Persona:")
-        for name, rate in sorted(betrayal_rate_per_persona(history, personas).items()):
-            print(f"  {name:12s}: {rate:.1%}")
-
-        acc = accusation_stats(history, personas)
-        if acc["total"]:
-            print(f"\nAccusations: {acc['total']} made, {acc['confirmed']} confirmed by "
-                  f"the engine, {acc['refuted']} refuted ({acc['known_lies']} were lies)")
-            for name, row in sorted(acc["by_persona"].items()):
-                print(f"  {name:12s}: {row['made']} made, {row['refuted']} refuted")
+        for name in sorted(counts):
+            broke, total = counts[name]
+            print(f"  {name:12s}: {fmt_rate(broke, total)}")
 
     mix = deal_mix(history)
     if mix["made"]:
         print("\nPromises made, and how often they were broken:")
         for kind in sorted(mix["made"]):
-            made = mix["made"][kind]
-            print(f"  {kind:12s}: {mix['broken'].get(kind, 0):3d}/{made:<3d} "
-                  f"= {mix['break_rate'][kind]:.0%}")
-
-    if personas:
-        lying = privacy_and_lying(history, personas)
-        if lying["verdicts"]:
-            print("\nAccusations: " + ", ".join(
-                f"{v.lower()} {n}" for v, n in sorted(lying["verdicts"].items())))
-            if lying["lies"]:
-                print(f"  {lying['lies']} were lies, "
-                      f"{lying['unfalsifiable_lies']} of them unfalsifiable")
+            print(f"  {kind:12s}: "
+                  f"{fmt_rate(mix['broken'].get(kind, 0), mix['made'][kind])}")
 
     pair = pair_trust_divergence(history)
     if pair["n"]:
@@ -105,6 +112,16 @@ def print_game_summary(history: list, final_state: GameState,
     print(f"First standing alliance: " +
           (f"turn {coalition}" if coalition else "never formed"))
 
+    rev = preference_reversals(reversals or [], personas)
+    if rev["n"]:
+        print(f"\nPreference reversals: {rev['reversed']}/{rev['n']} = "
+              f"{rev['rate']:.0%} of deals were signed and then, in the same turn, "
+              f"worth more broken than kept (mean edge {rev['mean_gap']:+.2f})")
+        for kind, (n, b, _r) in sorted(rev["by_kind"].items()):
+            print(f"  {kind:12s}: {fmt_rate(b, n)}")
+        for k, (n, b, _r) in sorted(rev["by_persona"].items()):
+            print(f"  {k:12s}: {fmt_rate(b, n)}")
+
     if calibration:
         score = brier_score(calibration)
         if score is not None:
@@ -117,22 +134,26 @@ def print_game_summary(history: list, final_state: GameState,
                       f"(n={b['count']:>3}) -> kept {b['observed_rate']:.0%} {bar}")
 
     # Alliance durations
-    alliances = alliance_durations(history)
+    alliances = alliance_durations(history, horizon=len(history))
     if alliances:
         avg_dur = sum(a["duration"] for a in alliances) / len(alliances)
         kept = sum(1 for a in alliances if a["status"] == "kept")
-        print(f"\nAlliances: {len(alliances)} total, "
-              f"{kept} kept, avg duration {avg_dur:.1f} turns")
+        censored = sum(1 for a in alliances if a["status"] == "censored")
+        print(f"\nAlliances: {len(alliances)} total, {kept} ran to term, "
+              f"{censored} still live at the horizon, "
+              f"avg observed duration {avg_dur:.1f} turns")
+        if censored:
+            print(f"  (the {censored} censored ones are a lower bound, not a result)")
 
     # SC timeline (compact)
-    timeline = supply_center_timeline(history)
+    timeline = supply_center_timeline(history, final_state)
     print("\nSupply Centers Over Time:")
-    header = "  Turn  " + "  ".join(f"{p.value:>5}" for p in Player)
+    header = "  Turn  " + "  ".join(f"{p.value:>5}" for p in players())
     print(header)
     turns = max(len(v) for v in timeline.values()) if timeline else 0
     for t in range(turns):
         row = f"  {t + 1:4d}  "
-        for p in Player:
+        for p in players():
             val = timeline[p][t] if t < len(timeline[p]) else 0
             row += f"  {val:>5}"
         print(row)
@@ -143,44 +164,55 @@ def print_game_summary(history: list, final_state: GameState,
 def print_tournament_summary(
     game_results: List[Dict[Player, int]],
     all_histories: List[list],
-    personas: Dict[Player, str] = None,
+    all_personas: List[Dict[Player, str]] = None,
 ):
-    """Print cross-game tournament statistics."""
+    """Print cross-game tournament statistics.
+
+    *all_personas* is one mapping per game, because the harness rotates the
+    personas one seat per seed. Pooling them under a single game's mapping —
+    which is what this used to do — attributes every rate to the wrong
+    persona in three games out of four.
+    """
     print("\n" + "=" * 60)
     print("  TOURNAMENT SUMMARY")
     print("=" * 60)
 
     n = len(game_results)
-    print(f"\nGames Played: {n}")
+    print(f"\nGames Played: {n}" +
+          (f"   [below MIN_GAMES={MIN_GAMES}: nothing here is reportable]"
+           if n < MIN_GAMES else ""))
 
     wr = win_rates(game_results)
-    print("\nWin Rates:")
-    for p in Player:
-        bar = "█" * int(wr[p] * 20)
-        print(f"  {p.value:6s}: {wr[p]:.1%}  {bar}")
+    print("\nWin Rates by seat (should be flat — the personas rotate):")
+    for p in players():
+        print(f"  {p.value:6s}: {fmt_rate(round(wr[p] * n), n)}")
 
-    # Aggregate betrayal rates
-    all_rates: Dict[Player, List[float]] = {p: [] for p in Player}
-    for history in all_histories:
-        rates = betrayal_rate_per_player(history)
-        for p in Player:
-            all_rates[p].append(rates[p])
+    print("\nAverage Betrayal Rates by seat:")
+    for p in players():
+        values = [betrayal_rate_per_player(h)[p] for h in all_histories]
+        print(f"  {p.value:6s}: {fmt_mean(values, '{:.1%}')}")
 
-    print("\nAverage Betrayal Rates:")
-    for p in Player:
-        avg = sum(all_rates[p]) / max(1, len(all_rates[p]))
-        label = f"{p.value} ({personas[p]})" if personas else p.value
-        print(f"  {label:24s}: {avg:.1%}")
+    if all_personas:
+        pooled: Dict[str, List[int]] = {}
+        wins: Dict[str, float] = {}
+        for history, personas, scores in zip(all_histories, all_personas,
+                                             game_results):
+            for name, (broke, total) in _betrayal_counts(history, personas).items():
+                row = pooled.setdefault(name, [0, 0])
+                row[0] += broke
+                row[1] += total
+            best = max(scores.values())
+            champs = [p for p, c in scores.items() if c == best]
+            for c in champs:
+                wins[personas[c]] = wins.get(personas[c], 0) + 1 / len(champs)
 
-    if personas:
-        pooled: Dict[str, List[float]] = {}
-        for history in all_histories:
-            for name, rate in betrayal_rate_per_persona(history, personas).items():
-                pooled.setdefault(name, []).append(rate)
-        print("\nBy Persona:")
-        for name, values in sorted(pooled.items()):
-            avg = sum(values) / len(values)
-            print(f"  {name:12s}: {avg:.1%}  {'#' * round(avg * 30)}")
+        print("\nBetrayal Rate by Persona (pooled over every commitment):")
+        for name, (broke, total) in sorted(pooled.items()):
+            print(f"  {name:12s}: {fmt_rate(broke, total)}")
+
+        print("\nWin share by Persona:")
+        for name, w in sorted(wins.items(), key=lambda r: -r[1]):
+            print(f"  {name:12s}: {fmt_rate(round(w), n)}")
 
     print("=" * 60)
 
@@ -195,8 +227,10 @@ def export_game_data(
         "final_scores": {p.value: s for p, s in final_scores(final_state).items()},
         "betrayals": betrayal_events(history),
         "betrayal_rates": {p.value: r for p, r in betrayal_rate_per_player(history).items()},
-        "alliances": alliance_durations(history),
-        "sc_timeline": {p.value: v for p, v in supply_center_timeline(history).items()},
+        "alliances": alliance_durations(history, horizon=len(history)),
+        "sc_timeline": {p.value: v
+                        for p, v in supply_center_timeline(
+                            history, final_state).items()},
     }
     os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
     with open(filepath, "w") as f:

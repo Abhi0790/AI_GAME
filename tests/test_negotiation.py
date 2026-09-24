@@ -62,17 +62,18 @@ def _propose(commitment_type=CommitmentType.ALLIANCE, turns=3, **kw):
 class TestAcceptanceIsExpectedValue:
     def test_accepts_when_expected_value_beats_no_deal(self):
         ns = _strategy()
-        trust = TrustModel(Player.RED)                 # P(keep) ≈ 0.5
+        trust = TrustModel(Player.RED)                 # a stranger, P(keep) ≈ 0.9
         _stub_values(ns, v_none=1.0, v_kept=3.0, v_broken=0.5)
-        # 0.5*3.0 + 0.5*0.5 = 1.75 > 1.0
+        # 0.9*3.0 + 0.1*0.5 = 2.75 > 1.0
         assert ns.evaluate_proposal(_make_state(), _propose(), trust).message_type \
             == MessageType.ACCEPT
 
     def test_rejects_when_exposure_outweighs_the_upside(self):
         ns = _strategy()
         trust = TrustModel(Player.RED)
-        # A big upside that is not big enough to cover being walked over.
-        _stub_values(ns, v_none=2.0, v_kept=2.6, v_broken=-2.0)
+        # A big upside that is not big enough to cover being walked over, even
+        # by a stranger trusted at 0.9: 0.9*2.6 + 0.1*-10 = 1.34 < 2.0.
+        _stub_values(ns, v_none=2.0, v_kept=2.6, v_broken=-10.0)
         ns._counter_terms = lambda msg: None
         assert ns.evaluate_proposal(_make_state(), _propose(), trust).message_type \
             == MessageType.REJECT
@@ -204,7 +205,7 @@ class TestMessageToCommitment:
         assert c.commitment_type == CommitmentType.ALLIANCE
         assert Player.RED in c.players
         assert Player.BLUE in c.players
-        assert c.valid_until_turn == 7  # 4 + 3
+        assert c.valid_until_turn == 6  # turns 4,5,6 — last graded turn, inclusive
 
     def test_dmz_conversion(self):
         msg = Message(id="m2", sender=Player.RED, receiver=Player.BLUE,
@@ -214,4 +215,74 @@ class TestMessageToCommitment:
         c = message_to_commitment(msg, Player.BLUE, current_turn=1)
         assert c.commitment_type == CommitmentType.DMZ
         assert c.dmz_territories == ["N1"]
-        assert c.valid_until_turn == 3
+        assert c.valid_until_turn == 2  # turns 1,2
+
+
+def test_a_quote_is_not_a_signed_price():
+    """Pricing a deal every turn must not reset the price it was signed at."""
+    from src.agents.agent import Agent
+    from src.common.schemas import commitment_key
+    agent = Agent(Player.RED, "Honest")
+    ns = agent.negotiation
+    deal = Commitment(id="d", commitment_type=CommitmentType.ALLIANCE,
+                      players=[Player.RED, Player.BLUE], valid_until_turn=4)
+    key = commitment_key(deal)
+    state = lambda t: GameState(turn=t, units=[], supply_centers={}, territory_owners={})
+    ns._record_price(state(2), deal, 1.5)
+    agent.deal_signed(deal, 2)
+    ns._record_price(state(3), deal, 9.0)
+    assert ns.deal_prices[key] == 1.5 and ns.deal_signed_turn[key] == 2
+
+
+def test_no_deals_with_a_player_about_to_win():
+    """One centre from winning, a player's offers are refused and none are made to them."""
+    from src.agents.agent import Agent
+    from src.common.schemas import MessageType
+    red = Agent(Player.RED, "Honest")
+    units = [Unit(player=Player.RED, territory="R1"), Unit(player=Player.RED, territory="R2"),
+             Unit(player=Player.BLUE, territory="B1"), Unit(player=Player.BLUE, territory="N1")]
+    near = {"R1": Player.RED, "R2": Player.RED, "B1": Player.BLUE, "B2": Player.BLUE,
+            "N1": Player.BLUE, "N2": Player.BLUE}
+    state = GameState(turn=3, units=units, supply_centers=near,
+                      territory_owners={u.territory: u.player for u in units})
+    offer = Message(id="m", sender=Player.BLUE, receiver=Player.RED,
+                    message_type=MessageType.PROPOSE,
+                    commitment_type=CommitmentType.ALLIANCE, turns=3)
+    [answer] = red.reply(state, [offer])
+    assert answer.message_type == MessageType.REJECT
+    assert not any(m.receiver == Player.BLUE and m.message_type == MessageType.PROPOSE
+                   for m in red.propose(state))
+
+
+
+def test_nobody_is_about_to_win_at_the_start_of_a_two_seat_game():
+    """The threshold there is one above the starting centres; deals must still be possible."""
+    from src.agents.planner.planner import near_win
+    from src.common.config import GameConfig
+    from src.harness import build_runner, game_setup
+    cfg = GameConfig(seed=1, n_seats=2)
+    with game_setup(cfg):
+        runner = build_runner(cfg)
+        assert not any(near_win(runner.state, p) for p in runner.agents)
+
+
+def test_a_bound_player_does_not_sign_away_its_growth():
+    """One two-way alliance at a time, and no promise to stay out of a centre it
+    can take. The Opportunist is not bound and signs either."""
+    from src.agents.agent import Agent
+    units = [Unit(player=Player.RED, territory="R1"), Unit(player=Player.RED, territory="R2"),
+             Unit(player=Player.BLUE, territory="B1"), Unit(player=Player.BLUE, territory="B2")]
+    state = GameState(turn=1, units=units,
+                      supply_centers={"R1": Player.RED, "R2": Player.RED,
+                                      "B1": Player.BLUE, "B2": Player.BLUE, "N1": None},
+                      territory_owners={u.territory: u.player for u in units})
+    dmz = Commitment(id="d", commitment_type=CommitmentType.DMZ,
+                     players=[Player.RED, Player.BLUE], valid_until_turn=3,
+                     dmz_territories=["N1"])
+    ally = lambda other: Commitment(id=other.value, commitment_type=CommitmentType.ALLIANCE,
+                                    players=[Player.RED, other], valid_until_turn=3)
+    honest, opp = Agent(Player.RED, "Honest").negotiation, Agent(Player.RED, "Opportunist").negotiation
+    honest._live_commitments = opp._live_commitments = [ally(Player.GREEN)]
+    assert honest.overcommits(state, dmz) and honest.overcommits(state, ally(Player.BLUE))
+    assert not honest.overcommits(state, ally(Player.GREEN)), "renewing the one alliance is fine"
+    assert not opp.overcommits(state, dmz) and not opp.overcommits(state, ally(Player.BLUE))

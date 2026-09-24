@@ -1,5 +1,5 @@
 import React from "react";
-import { POS, COLOR } from "../constants.js";
+import { COLOR, VIEWBOX } from "../constants.js";
 
 /** The map: one node per territory, arrows for the turn's orders.
  *
@@ -8,8 +8,12 @@ import { POS, COLOR } from "../constants.js";
  * the log says it succeeded and dashed red when it bounced.
  */
 export default function Board({ board, state, step, onPick, selected }) {
-  if (!board) return <div className="board" />;
+  if (!board?.positions) return <div className="board" />;
 
+  const POS = board.positions;
+  const CODE = board.seat_codes ?? {};
+  // Shrink nodes as the board grows, or they overlap.
+  const scale = Math.min(1, Math.sqrt(12 / board.territories.length));
   const centres = new Set(board.supply_centers);
   const unitAt = {};
   for (const u of state?.units ?? []) unitAt[u.territory] = u.player;
@@ -35,7 +39,7 @@ export default function Board({ board, state, step, onPick, selected }) {
     if (!a || !b) return [];
     if (o.order_type !== "Move" && o.order_type !== "Support") return [];
     const dx = b.x - a.x, dy = b.y - a.y;
-    const len = Math.hypot(dx, dy) || 1, s = 28;
+    const len = Math.hypot(dx, dy) || 1, s = 28 * scale;
     const isSupport = o.order_type === "Support";
     const ok = log.includes(`Move succeeds: ${o.unit_territory} ->`);
     return [
@@ -51,7 +55,7 @@ export default function Board({ board, state, step, onPick, selected }) {
 
   return (
     <div className="board">
-      <svg viewBox="0 0 500 500" role="img" aria-label="Game board">
+      <svg viewBox={`0 0 ${VIEWBOX} ${VIEWBOX}`} role="img" aria-label="Game board">
         <defs>
           <marker id="ah-ok" markerWidth="7" markerHeight="6" refX="6.5" refY="3" orient="auto">
             <path d="M0 0 L7 3 L0 6 Z" fill="#5fb98b" />
@@ -73,7 +77,7 @@ export default function Board({ board, state, step, onPick, selected }) {
             const owner = isSc
               ? state?.supply_centers?.[name]
               : state?.territory_owners?.[name];
-            const r = isSc ? 25 : 20;
+            const r = (isSc ? 25 : 20) * scale;
             const occupied = !!unitAt[name];
             return (
               <g key={name}
@@ -96,11 +100,21 @@ export default function Board({ board, state, step, onPick, selected }) {
                     {occupied ? `, ${unitAt[name]} unit` : ""}
                   </title>
                 </circle>
-                <text className="nlabel" x={p.x} y={occupied ? p.y - 5 : p.y}>
+                <text className="nlabel" x={p.x} y={occupied ? p.y - 5 * scale : p.y}
+                      style={{ fontSize: `${11 * scale}px` }}>
                   {name}
                 </text>
                 {occupied && (
-                  <text className="nunit" x={p.x} y={p.y + 8} fill="#0b0d10">▲</text>
+                  <text className="nunit" x={p.x} y={p.y + 8 * scale} fill="#0b0d10"
+                        style={{ fontSize: `${11 * scale}px` }}>
+                    ▲{CODE[unitAt[name]] ?? ""}
+                  </text>
+                )}
+                {!occupied && owner && (
+                  <text className="nowner" x={p.x} y={p.y + 9 * scale} fill="#0b0d10"
+                        style={{ fontSize: `${9 * scale}px` }}>
+                    {CODE[owner] ?? ""}
+                  </text>
                 )}
               </g>
             );

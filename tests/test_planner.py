@@ -178,3 +178,30 @@ class TestPlanner:
         orders, trace = planner.find_best_orders(state, [], trust)
         assert len(orders) == 0
         assert "Fallback" in trace.explanation or trace.expected_value == 0
+
+
+class TestGameEnd:
+    """A player at win_centers ends the game; one short of it is about to."""
+
+    BLUE_WINS = {"R1": Player.RED, "R2": Player.RED, "B1": Player.BLUE, "B2": Player.BLUE,
+                 "N1": Player.BLUE, "N2": Player.BLUE, "G1": Player.BLUE}
+
+    def test_a_rival_reaching_the_threshold_costs_the_game_end_value(self):
+        from src.agents.planner.planner import GAME_END_VALUE
+        one_short = dict(self.BLUE_WINS, G1=Player.GREEN)
+        drop = (evaluate_state(_make_state(supply_centers=one_short), Player.RED)
+                - evaluate_state(_make_state(supply_centers=self.BLUE_WINS), Player.RED))
+        assert drop == pytest.approx(GAME_END_VALUE)
+
+    def test_breaking_a_deal_with_a_player_about_to_win_is_not_charged(self):
+        from src.agents.planner.planner import penalty_breakdown
+        deal = Commitment(id="a", commitment_type=CommitmentType.DMZ,
+                          players=[Player.RED, Player.BLUE], valid_until_turn=5,
+                          dmz_territories=["N1"])
+        attack = [Order(player=Player.RED, unit_territory="R2",
+                        order_type=OrderType.MOVE, target="N1")]
+        cfg = PlannerConfig()
+        near = dict(self.BLUE_WINS, G1=Player.GREEN)
+        far = {"R1": Player.RED, "R2": Player.RED, "B1": Player.BLUE, "B2": Player.BLUE}
+        assert penalty_breakdown(_make_state(supply_centers=far), Player.RED, attack, [deal], cfg)
+        assert not penalty_breakdown(_make_state(supply_centers=near), Player.RED, attack, [deal], cfg)

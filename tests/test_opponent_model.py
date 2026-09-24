@@ -126,3 +126,19 @@ class TestOpponentModel:
         for sample_set in samples:
             for o in sample_set:
                 assert o.player != Player.RED
+
+
+def test_draws_break_at_the_believed_rate():
+    """The sampler's betrayal rate is 1 - P(keeps), however many order sets break."""
+    import random
+    from src.agents.trust.model import TrustModel
+    state = _make_state()
+    deal = Commitment(id="d", commitment_type=CommitmentType.DMZ,
+                      players=[Player.RED, Player.BLUE], valid_until_turn=3,
+                      dmz_territories=["N1"])
+    model, trust = OpponentModel(Player.RED), TrustModel(Player.RED)
+    p_keep = trust.p_keeps(Player.BLUE, CommitmentType.DMZ, toward=Player.RED)
+    random.seed(0)
+    draws = model.sample_opponent_orders(state, 4000, commitments=[deal], trust_model=trust)
+    broke = sum(any(o.player == Player.BLUE and o.target == "N1" for o in w) for w in draws)
+    assert abs(broke / len(draws) - (1 - p_keep)) < 0.03

@@ -5,26 +5,133 @@ Each function operates on a game history (list of turn records produced by
 GameRunner) and returns structured data.
 """
 
+import math
+import statistics
 from typing import Dict, List, Tuple, Any, Optional
 from collections import defaultdict
 
-from src.common.schemas import Player, GameState, CommitmentType, CalibrationPoint
+from src.engine.board import players
+from src.common.schemas import (
+    Player, GameState, CommitmentType, CalibrationPoint, ReversalPoint, leaders,
+    obligated_parties,
+)
+
+
+# ── Uncertainty ──────────────────────────────────────────────────────────
+# Nothing here used to carry an interval, so a 0% and a 100% measured over
+# two games read like facts. Every rate a script prints now goes through
+# these, and anything backed by fewer than MIN_GAMES games says so.
+
+MIN_GAMES = 20
+
+
+def ci95(successes: int, n: int) -> Tuple[float, float, float]:
+    """Observed rate and the bounds of its 95% Wilson interval: (rate, lo, hi).
+
+    Wilson rather than normal-approximation because it stays sane at 0/n and
+    n/n. The interval is asymmetric about the observed rate -- 0 wins from 20
+    is 0% with an upper bound near 16%, not 0% +/- 8% -- so the bounds are
+    returned rather than a half-width somebody would centre on the wrong point.
+    """
+    if n <= 0:
+        return 0.0, 0.0, 0.0
+    z = 1.96
+    p = successes / n
+    denom = 1.0 + z * z / n
+    centre = (p + z * z / (2 * n)) / denom
+    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom
+    return p, max(0.0, centre - half), min(1.0, centre + half)
+
+
+def clustered_rate_ci95(groups: List[Tuple[int, int]]) -> Tuple[Optional[float], float, int]:
+    """(pooled rate, 95% half-width, groups) for (trials, successes) per group.
+
+    The pooled rate with a group-clustered standard error, so the interval is
+    centred on the reported rate while counting groups, not rows.
+    """
+    total = sum(n for n, _ in groups)
+    if not total:
+        return None, 0.0, len(groups)
+    rate = sum(b for _, b in groups) / total
+    g = len(groups)
+    if g < 2:
+        return rate, 0.0, g
+    var = g / (g - 1) * sum((b - rate * n) ** 2 for n, b in groups) / total ** 2
+    return rate, 1.96 * math.sqrt(var), g
+
+
+def mean_ci95(values: List[float]) -> Tuple[Optional[float], float, int]:
+    """(mean, 95% half-width, n) for a list of measurements."""
+    vals = [v for v in values if v is not None]
+    n = len(vals)
+    if n == 0:
+        return None, 0.0, 0
+    mean = sum(vals) / n
+    if n < 2:
+        return mean, 0.0, n
+    return mean, 1.96 * statistics.stdev(vals) / math.sqrt(n), n
+
+
+def _tag(n: int) -> str:
+    return (f" [n={n} < {MIN_GAMES}: not reportable]" if n < MIN_GAMES
+            else f" (n={n})")
+
+
+def fmt_ci(value: Optional[float], half: float, n: int, fmt: str = "{:.1%}") -> str:
+    """'32.0% +/-6.1% (n=418)', or the not-reportable tag below MIN_GAMES.
+
+    The one place a number with an interval is turned into text, so the
+    scripts cannot drift apart on how they say "we did not measure enough".
+    """
+    if value is None:
+        return f"n/a (n={n})"
+    return f"{fmt.format(value)} +/-{fmt.format(half)}{_tag(n)}"
+
+
+def fmt_bounds(value: float, lo: float, hi: float, n: int,
+               fmt: str = "{:.1%}") -> str:
+    """'32.0% [26.1, 38.5] (n=418)' — an asymmetric interval, stated as bounds."""
+    return (f"{fmt.format(value)} [{fmt.format(lo)}, {fmt.format(hi)}]"
+            f"{_tag(n)}")
+
+
+def fmt_rate(successes: int, n: int) -> str:
+    """A rate out of n trials, with its Wilson interval."""
+    return fmt_bounds(*ci95(successes, n), n)
+
+
+def fmt_mean(values: List[float], fmt: str = "{:.3f}") -> str:
+    """A mean of per-game measurements, with its interval."""
+    return fmt_ci(*mean_ci95(values), fmt=fmt)
 
 
 # ── Per-game metrics ─────────────────────────────────────────────────────
 
-def supply_center_timeline(history: list) -> Dict[Player, List[int]]:
-    """Return a dict mapping each player to a list of supply-center counts,
-    one entry per turn."""
-    timeline: Dict[Player, List[int]] = {p: [] for p in Player}
+def supply_center_timeline(history: list, final_state: GameState = None
+                           ) -> Dict[Player, List[int]]:
+    """Centres held per player, one entry per turn.
+
+    `step.state` is the position BEFORE that turn's orders, so the last
+    autumn's captures never appeared. Pass `final_state` to close the series;
+    without it the last turn of the game is still missing from the plot.
+    """
+    timeline: Dict[Player, List[int]] = {p: [] for p in players()}
 
     for step in history:
         state: GameState = step.state
-        counts = {p: 0 for p in Player}
+        counts = {p: 0 for p in players()}
         for owner in state.supply_centers.values():
             if owner:
                 counts[owner] += 1
-        for p in Player:
+        for p in players():
+            timeline[p].append(counts[p])
+
+    if final_state is not None:
+        counts = {p: 0 for p in players()}
+        for owner in final_state.supply_centers.values():
+            if owner:
+                counts[owner] += 1
+        for p in players():
             timeline[p].append(counts[p])
 
     return timeline
@@ -45,21 +152,35 @@ def betrayal_events(history: list) -> List[Dict[str, Any]]:
     return events
 
 
+def obligations(step) -> Dict[tuple, bool]:
+    """{(player, partner): broke} for one turn: whether each player broke
+    anything it owed each partner.
+
+    The unit a betrayal rate counts. One hostile move typically breaks an
+    alliance, a DMZ and an exchange with the same partner at once, and
+    counting per deal made that one decision three betrayals.
+    """
+    out: Dict[tuple, bool] = {}
+    for o in step.outcomes:
+        for p in obligated_parties(o.commitment, step.state.turn):
+            for q in o.commitment.players:
+                if q != p:
+                    out[(p, q)] = out.get((p, q), False) or p in o.broken_by
+    return out
+
+
 def betrayal_rate_per_player(history: list) -> Dict[Player, float]:
-    """Fraction of commitments each player broke out of commitments they
-    participated in."""
+    """Fraction of (turn, partner) obligations each player broke."""
     participated: Dict[Player, int] = defaultdict(int)
     broken: Dict[Player, int] = defaultdict(int)
 
     for step in history:
-        for o in step.outcomes:
-            for p in o.commitment.players:
-                participated[p] += 1
-                if p in o.broken_by:
-                    broken[p] += 1
+        for (p, _q), broke in obligations(step).items():
+            participated[p] += 1
+            broken[p] += broke
 
     rates: Dict[Player, float] = {}
-    for p in Player:
+    for p in players():
         if participated[p] > 0:
             rates[p] = broken[p] / participated[p]
         else:
@@ -67,9 +188,16 @@ def betrayal_rate_per_player(history: list) -> Dict[Player, float]:
     return rates
 
 
-def alliance_durations(history: list) -> List[Dict[str, Any]]:
-    """Return a list of alliance records with their actual duration
-    (turns before broken or expiry)."""
+def alliance_durations(history: list, kind: str = "Alliance", horizon: int = None
+                       ) -> List[Dict[str, Any]]:
+    """How long each deal of `kind` lasted before it broke or expired.
+
+    Two things it used to get wrong: it covered every commitment type despite
+    its name, and a deal still running when the game ended was recorded as
+    having been kept for its full intended term. That is right-censoring, and
+    counting it as a completed success overstates how long deals hold. Pass
+    `horizon` (the last turn played) to mark those `censored` instead.
+    """
     # Track when commitments first appear and when they break
     commitment_first_seen: Dict[str, int] = {}
     commitment_broken_turn: Dict[str, Optional[int]] = {}
@@ -77,6 +205,9 @@ def alliance_durations(history: list) -> List[Dict[str, Any]]:
 
     for turn_idx, step in enumerate(history):
         for o in step.outcomes:
+            # The name says alliances; it used to count every deal type.
+            if kind is not None and o.commitment.commitment_type.value != kind:
+                continue
             cid = o.commitment.id
             if cid not in commitment_first_seen:
                 commitment_first_seen[cid] = turn_idx + 1
@@ -96,9 +227,16 @@ def alliance_durations(history: list) -> List[Dict[str, Any]]:
             duration = ended - started
             status = "broken"
         else:
+            # valid_until_turn is the LAST turn graded, inclusive, so a deal
+            # struck and expiring on the same turn lasted one turn, not zero.
             ended = info["valid_until"]
-            duration = max(0, ended - started)
-            status = "kept"
+            if horizon is not None and ended > horizon:
+                # Still alive when the clock stopped: observed, not completed.
+                ended = horizon
+                status = "censored"
+            else:
+                status = "kept"
+            duration = max(0, ended - started + 1)
         records.append({**info, "started": started, "ended": ended,
                         "duration": duration, "status": status})
     return records
@@ -106,7 +244,7 @@ def alliance_durations(history: list) -> List[Dict[str, Any]]:
 
 def final_scores(state: GameState) -> Dict[Player, int]:
     """Return supply-center counts from the final game state."""
-    counts = {p: 0 for p in Player}
+    counts = {p: 0 for p in players()}
     for owner in state.supply_centers.values():
         if owner:
             counts[owner] += 1
@@ -117,14 +255,17 @@ def final_scores(state: GameState) -> Dict[Player, int]:
 
 def win_rates(game_results: List[Dict[Player, int]]) -> Dict[Player, float]:
     """Given a list of per-game score dicts, return win rates."""
-    wins: Dict[Player, int] = {p: 0 for p in Player}
+    # Seats come from the results, not the currently installed board.
+    seats = list(game_results[0]) if game_results else list(players())
+    # A shared lead is split, so the rates sum to 1 rather than to the mean
+    # number of tied leaders.
+    wins: Dict[Player, float] = {p: 0.0 for p in seats}
     for scores in game_results:
-        mx = max(scores.values())
-        winners = [p for p, s in scores.items() if s == mx]
-        for w in winners:
-            wins[w] += 1
+        ahead = leaders(scores)
+        for w in ahead:
+            wins[w] += 1.0 / len(ahead)
     total = max(1, len(game_results))
-    return {p: wins[p] / total for p in Player}
+    return {p: wins[p] / total for p in seats}
 
 
 # ── Persona-keyed metrics ────────────────────────────────────────────────
@@ -136,17 +277,15 @@ def win_rates(game_results: List[Dict[Player, int]]) -> Dict[Player, float]:
 
 def betrayal_rate_per_persona(history: list, personas: Dict[Player, str]
                               ) -> Dict[str, float]:
-    """Fraction of the commitments each persona was in that it broke."""
+    """Fraction of (turn, partner) obligations each persona broke."""
     participated: Dict[str, int] = defaultdict(int)
     broken: Dict[str, int] = defaultdict(int)
 
     for step in history:
-        for o in step.outcomes:
-            for p in o.commitment.players:
-                name = personas.get(p, "Unknown")
-                participated[name] += 1
-                if p in o.broken_by:
-                    broken[name] += 1
+        for (p, _q), broke in obligations(step).items():
+            name = personas.get(p, "Unknown")
+            participated[name] += 1
+            broken[name] += broke
 
     return {name: broken[name] / participated[name]
             for name in participated if participated[name]}
@@ -163,12 +302,10 @@ def betrayal_rate_by_turn(history: list, personas: Dict[Player, str]
     for step in history:
         participated: Dict[str, int] = defaultdict(int)
         broken: Dict[str, int] = defaultdict(int)
-        for o in step.outcomes:
-            for p in o.commitment.players:
-                name = personas.get(p, "Unknown")
-                participated[name] += 1
-                if p in o.broken_by:
-                    broken[name] += 1
+        for (p, _q), broke in obligations(step).items():
+            name = personas.get(p, "Unknown")
+            participated[name] += 1
+            broken[name] += broke
         for name in set(personas.values()):
             series[name].append(
                 broken[name] / participated[name] if participated[name] else None)
@@ -199,6 +336,29 @@ def vcoop_at_break(history: list, personas: Dict[Player, str]) -> List[Dict[str,
     return rows
 
 
+def forfeit_at_break(history: list) -> List[Dict[str, Any]]:
+    """The other half of the price of a break: what an unfinished exchange
+    leg costs to walk away from, read off `trace.forfeit_rows`.
+
+    Empty until the planner records them — a break priced without a forfeit is
+    not an error, it just means no exchange was outstanding.
+    """
+    rows = []
+    for turn_idx, step in enumerate(history):
+        for player, trace in (step.traces or {}).items():
+            for key, partner, price, fraction, amount in getattr(trace, "forfeit_rows", []):
+                rows.append({
+                    "turn": turn_idx + 1,
+                    "player": player.value,
+                    "commitment": key,
+                    "partner": getattr(partner, "value", partner),
+                    "price": price,
+                    "fraction_remaining": fraction,
+                    "forfeit": amount,
+                })
+    return rows
+
+
 def adjudications_per_turn(history: list) -> List[int]:
     """Total calls to the adjudicator each turn, across all seats — the
     x-axis of the search-variant comparison."""
@@ -212,9 +372,6 @@ def turns_to_coalition(history: list, stable_for: int = 3) -> Optional[int]:
     negotiation somebody signs one on turn 1 of every game, so that version
     of this metric was a constant. What matters is an alliance that has
     survived `stable_for` consecutive turns without either side breaking it.
-
-    The control is the same game with broadcasts switched off
-    (GameRunner(broadcast_enabled=False)).
     """
     from src.common.schemas import commitment_key
 
@@ -238,28 +395,55 @@ def turns_to_coalition(history: list, stable_for: int = 3) -> Optional[int]:
     return None
 
 
-def accusation_stats(history: list, personas: Dict[Player, str]) -> Dict[str, Any]:
-    """Who accused whom, and how often the engine backed them up."""
-    total = confirmed = refuted = lies = 0
-    by_persona: Dict[str, Dict[str, int]] = defaultdict(
-        lambda: {"made": 0, "confirmed": 0, "refuted": 0})
-    for step in history:
-        for m in (step.messages or []):
-            if m.broadcast_kind != "BETRAYED":
-                continue
-            total += 1
-            name = personas.get(m.sender, "Unknown")
-            by_persona[name]["made"] += 1
-            if m.engine_verdict == "CONFIRMED":
-                confirmed += 1
-                by_persona[name]["confirmed"] += 1
-            else:
-                refuted += 1
-                by_persona[name]["refuted"] += 1
-            if m.truthful is False:
-                lies += 1
-    return {"total": total, "confirmed": confirmed, "refuted": refuted,
-            "known_lies": lies, "by_persona": dict(by_persona)}
+def preference_reversals(reversals: List[ReversalPoint],
+                         personas: Optional[Dict[Player, str]] = None
+                         ) -> Dict[str, Any]:
+    """How often an agent signed a deal and then, in the same turn, preferred
+    to break it.
+
+    A reversal is `signed_gain > 0 and break_advantage > 0`: the negotiator
+    paid for the promise and the planner immediately valued walking away from
+    it more highly, penalty included. It is not hypocrisy — it is the two
+    halves of one agent running on different models of the same partner, and
+    it is measurable only because both prices are now written down.
+    """
+    if not reversals:
+        return {"n": 0}
+    flipped = [r for r in reversals if r.reversed_]
+    by_kind: Dict[str, List[int]] = defaultdict(lambda: [0, 0])
+    by_persona: Dict[str, List[int]] = defaultdict(lambda: [0, 0])
+    for r in reversals:
+        row = by_kind[r.commitment_type.value]
+        row[0] += 1
+        row[1] += int(r.reversed_)
+        if personas:
+            prow = by_persona[personas.get(r.player, "Unknown")]
+            prow[0] += 1
+            prow[1] += int(r.reversed_)
+    # Clustered by game where the rows say which game they came from: a
+    # pooled Wilson interval over 2,000 rows from 20 games reported a
+    # precision the corpus does not have. Falls back to pooling when nothing
+    # stamped them.
+    by_game: Dict[Any, List[int]] = defaultdict(lambda: [0, 0])
+    for r in reversals:
+        if r.game is not None:
+            row = by_game[r.game]
+            row[0] += 1
+            row[1] += int(r.reversed_)
+    ci = (clustered_rate_ci95(list(by_game.values()))
+          if by_game else (*ci95(len(flipped), len(reversals)), len(reversals)))
+
+    return {
+        "n": len(reversals),
+        "games": len(by_game) or None,
+        "ci": ci,
+        "reversed": len(flipped),
+        "rate": len(flipped) / len(reversals),
+        "mean_gap": (sum(r.break_advantage for r in flipped) / len(flipped)
+                     if flipped else 0.0),
+        "by_kind": {k: (n, b, b / n) for k, (n, b) in by_kind.items()},
+        "by_persona": {k: (n, b, b / n) for k, (n, b) in by_persona.items()},
+    }
 
 
 # ── Calibration ──────────────────────────────────────────────────────────
@@ -358,43 +542,6 @@ def deal_mix(history: list) -> Dict[str, Any]:
         "break_rate": {
             k: broken.get(k, 0) / made[k] for k in made if made[k]
         },
-    }
-
-
-def privacy_and_lying(history: list, personas: Dict[Player, str]) -> Dict[str, Any]:
-    """Does hiding a deal actually buy anything?
-
-    The claim the private-deal feature rests on is that an accusation the
-    engine cannot settle is worth making. These are the numbers that support
-    or sink it: how many accusations were unfalsifiable, how many of those
-    were lies, and whether the liars were believed.
-    """
-    verdicts: Dict[str, int] = defaultdict(int)
-    lies_by_persona: Dict[str, int] = defaultdict(int)
-    unfalsifiable_lies = refuted_lies = 0
-
-    for step in history:
-        for m in (step.messages or []):
-            if m.broadcast_kind != "BETRAYED":
-                continue
-            verdicts[m.engine_verdict or "NONE"] += 1
-            if m.truthful is False:
-                lies_by_persona[personas.get(m.sender, "Unknown")] += 1
-                if m.engine_verdict == "UNVERIFIED":
-                    unfalsifiable_lies += 1
-                elif m.engine_verdict == "REFUTED":
-                    refuted_lies += 1
-
-    total_lies = unfalsifiable_lies + refuted_lies
-    return {
-        "verdicts": dict(verdicts),
-        "lies": total_lies,
-        "lies_by_persona": dict(lies_by_persona),
-        "unfalsifiable_lies": unfalsifiable_lies,
-        "refuted_lies": refuted_lies,
-        # 1.0 means every lie went unchallenged, which would say the engine
-        # has stopped constraining anyone.
-        "lie_success_rate": (unfalsifiable_lies / total_lies) if total_lies else None,
     }
 
 

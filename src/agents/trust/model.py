@@ -1,7 +1,9 @@
+import math
 from typing import Dict, List, Tuple, Optional
 from src.common.schemas import (
     Player, CommitmentType, Commitment, CommitmentOutcome, BeliefSnapshot,
 )
+from src.engine.board import players
 
 # How much of the reputation hit a profitable betrayal is forgiven.
 # w = 1 - lambda * incentive  (slide 6). lambda = 0 makes every break cost the
@@ -29,25 +31,30 @@ MIN_EVIDENCE = 1e-6
 # --- Bayesian network: Reliability -> Keeps <- Incentive (slide 6) ----------
 # Three nodes. Reliability is the Beta posterior over "keeps promises of this
 # kind". Incentive is how much the board is offering them to break right now.
-# Keeps is the child, and this is its conditional table, written as two
-# anchors that get interpolated by the reliability estimate:
+# Keeps is the child, and this is its conditional table:
 #
-#   P(keeps | r, iota=0) = BN_FLOOR + (1 - BN_FLOOR) * r     (nothing on offer)
-#   P(keeps | r, iota=1) = BN_TEMPTED * r                    (everything is)
+#   P(keeps | r, iota) = BN_CEILING * sigmoid(BN_BIAS + BN_SLOPE * r)
+#                        * (1 - BN_TEMPTATION * min(1, iota / BN_INCENTIVE_SCALE))
 #
-# The gap between the two rows is what makes the prediction a network rather
-# than a Beta mean with extra steps.
+# A ceiling (most promises are kept), a drop at low reliability (a proven
+# betrayer is refused), and a discount for what is on offer. The old table,
+# floor + (1 - floor) * r, could not do the first two at once: once personas
+# kept 93% of promises, the floor that still refused a three-time betrayer
+# (<= 0.404) put every stranger near 0.7 and scored Brier 0.17 against 0.07 for
+# the base rate.
 #
-# These are FITTED, not chosen: src/evaluation/sweep.fit_cpt grid-searches
-# them against logged (reliability, incentive, kept?) triples, and
-# scripts/run_sweep.py reprints the fit and the grid it came from.
-BN_FLOOR = 0.2
-BN_TEMPTED = 0.35
+# BN_CEILING, BN_BIAS and BN_TEMPTATION are FITTED by src/evaluation/sweep.fit_cpt
+# on logged (reliability, incentive, kept?) triples, under the rule that a
+# partner who broke three promises in a row falls below even odds. BN_SLOPE is
+# judgement: almost no graded promise comes from a partner that unreliable, so
+# the data cannot say how steep the drop is.
+BN_CEILING = 0.96
+BN_BIAS = -1.213
+BN_SLOPE = 8.0
+BN_TEMPTATION = 0.042
 # Incentive is measured in centres of immediate gain, and a whole centre on
-# offer is rare — most live deals sit near zero. Without this the CPT's two
-# rows are blended at weights the data never reaches, and the incentive node
-# cannot move the answer however clear the evidence is. iota at or above the
-# scale counts as maximum temptation.
+# offer is rare — most live deals sit near zero. iota at or above the scale
+# counts as maximum temptation.
 BN_INCENTIVE_SCALE = 0.1
 
 # How much pair-specific evidence it takes before "X keeps promises to *me*"
@@ -60,22 +67,13 @@ PAIR_SHRINKAGE = 2.0
 
 
 def set_parameters(lambda_incentive: Optional[float] = None,
-                   evidence_decay: Optional[float] = None,
-                   bn_floor: Optional[float] = None,
-                   bn_tempted: Optional[float] = None,
-                   bn_incentive_scale: Optional[float] = None):
+                   evidence_decay: Optional[float] = None):
     """Rebind the global constants. The parameter sweep drives this."""
-    global LAMBDA_INCENTIVE, EVIDENCE_DECAY, BN_FLOOR, BN_TEMPTED, BN_INCENTIVE_SCALE
+    global LAMBDA_INCENTIVE, EVIDENCE_DECAY
     if lambda_incentive is not None:
         LAMBDA_INCENTIVE = lambda_incentive
     if evidence_decay is not None:
         EVIDENCE_DECAY = evidence_decay
-    if bn_floor is not None:
-        BN_FLOOR = bn_floor
-    if bn_tempted is not None:
-        BN_TEMPTED = bn_tempted
-    if bn_incentive_scale is not None:
-        BN_INCENTIVE_SCALE = bn_incentive_scale
 
 
 def break_weight(incentive: float) -> float:
@@ -86,20 +84,18 @@ def break_weight(incentive: float) -> float:
 
 
 def p_keeps_given(reliability: float, incentive: float,
-                  floor: Optional[float] = None, tempted_row: Optional[float] = None,
-                  scale: Optional[float] = None) -> float:
-    """The Keeps node's CPT, interpolated on the incentive.
+                  ceiling: Optional[float] = None, bias: Optional[float] = None,
+                  temptation: Optional[float] = None) -> float:
+    """The Keeps node's CPT.
 
     Pure function so the sweep and the tests can hit it without a model."""
-    floor = BN_FLOOR if floor is None else floor
-    tempted_row = BN_TEMPTED if tempted_row is None else tempted_row
-    scale = BN_INCENTIVE_SCALE if scale is None else scale
+    ceiling = BN_CEILING if ceiling is None else ceiling
+    bias = BN_BIAS if bias is None else bias
+    temptation = BN_TEMPTATION if temptation is None else temptation
 
     r = min(1.0, max(0.0, reliability))
-    i = min(1.0, max(0.0, incentive / scale if scale > 0 else incentive))
-    calm = floor + (1.0 - floor) * r
-    tempted = tempted_row * r
-    return (1.0 - i) * calm + i * tempted
+    t = min(1.0, max(0.0, incentive / BN_INCENTIVE_SCALE))
+    return ceiling / (1.0 + math.exp(-(bias + BN_SLOPE * r))) * (1.0 - temptation * t)
 
 
 class TrustRecord:
@@ -226,8 +222,8 @@ class TrustModel:
         Measured through the network, at the incentive they are acting under,
         because that is the number an observer will actually revise: the
         posterior moves from Beta(a, b) to Beta(a*d, b*d + w). Both layers
-        move, so betraying the one partner who has always trusted you costs
-        more than betraying a stranger.
+        move. The CPT is flat where reliability is high, so a first lapse with
+        a long-trusted partner costs little and a pattern costs a lot.
         """
         w = break_weight(incentive)
         before = self.p_keeps(player, c_type, incentive, toward)
@@ -246,17 +242,6 @@ class TrustModel:
 
         after = p_keeps_given(after_reliability, incentive)
         return max(0.0, before - after)
-
-    def apply_gossip(self, gossip_sender: Player, accused: Player, c_type: CommitmentType):
-        # Forward chaining rule base - Rule R3
-        # If trust in gossip_sender is high, discount accused trust
-        records = self.records.get(gossip_sender, {})
-        sender_trust = (sum(r.get_expected_value() for r in records.values()) / len(records)
-                        if records else self.prior_alpha / (self.prior_alpha + self.prior_beta))
-        if sender_trust > 0.6:
-            record = self.get_record(accused, c_type)
-            record.alpha *= 0.9 # decrease alpha slightly to reflect suspicion
-            record.beta += 0.1
 
     def general_trust(self, player: Player) -> float:
         """Average reliability across every kind of promise, prior if unseen."""
@@ -283,6 +268,6 @@ class TrustModel:
                     None if subject == self.owner
                     else self.get_reliability(subject, c_type, toward=self.owner)),
             )
-            for subject in Player
+            for subject in players()
             for c_type in CommitmentType
         ]

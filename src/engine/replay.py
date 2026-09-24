@@ -10,6 +10,7 @@ import os
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
+from src.engine.board import active
 from src.common.schemas import (
     GameState, Order, OrderType, Player, Unit, Commitment,
     CommitmentType, UnitType, describe_message,
@@ -109,10 +110,6 @@ def _serialise_messages(messages: list) -> list:
             "reference_id": m.reference_id,
             "condition": m.condition,
             "action": m.action,
-            "broadcast_kind": m.broadcast_kind,
-            "broadcast_target": m.broadcast_target.value if m.broadcast_target else None,
-            "engine_verdict": m.engine_verdict,
-            "truthful": m.truthful,
             "text": describe_message(m),
         }
         for m in messages
@@ -139,6 +136,7 @@ def save_replay(
     final_state: GameState,
     directory: str = "replays",
     filename: Optional[str] = None,
+    board: Optional[dict] = None,
 ) -> str:
     """Save a full game replay to a JSON file.
 
@@ -147,6 +145,7 @@ def save_replay(
         final_state: the final GameState after all turns
         directory: directory to save into
         filename: optional filename; defaults to timestamp-based name
+        board: the board played on, as `Board.to_dict()`; defaults to active
 
     Returns:
         The path of the saved replay file.
@@ -174,12 +173,14 @@ def save_replay(
             # nobody broke anything.
             "commitments": [_serialise_commitment(c) for c in step.commitments],
             "nodes": {p.value: n for p, n in (step.nodes or {}).items()},
+            "total_nodes": {p.value: n for p, n in (step.total_nodes or {}).items()},
         })
 
     replay = {
-        # 2: turn records carry the messages, beliefs, live deals and search
-        # cost, not just the state and the verdicts.
-        "version": 2,
+        # 2: turn records carry messages, beliefs, live deals, search cost.
+        # 3: the board is saved with the game.
+        "version": 3,
+        "board": board if board is not None else active().to_dict(),
         "turns": len(turns_data),
         "final_state": _serialise_state(final_state),
         "history": turns_data,

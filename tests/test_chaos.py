@@ -16,7 +16,7 @@ from src.common.schemas import (
 )
 from src.engine.adjudicator import resolve
 from src.engine.runner import GameRunner
-from src.engine.board import get_all_territories, MAX_TURNS
+from src.engine.board import get_all_territories, max_turns, players
 from src.agents.agent import Agent
 from src.agents.chaos import ChaosAgent, MODES
 
@@ -54,7 +54,7 @@ class TestAdjudicatorAgainstJunk:
                    Unit(player=Player.BLUE, territory="B1")],
             supply_centers={}, territory_owners={})
         orders = [
-            Order(player=rng.choice(list(Player)),
+            Order(player=rng.choice(players()),
                   unit_territory=rng.choice(territories),
                   order_type=rng.choice(list(OrderType)),
                   target=rng.choice(territories))
@@ -71,8 +71,10 @@ class TestChaosSeat:
     def test_full_game_survives_each_mode(self, mode):
         runner = _game(mode)
         winner = runner.run(verbose=False)
-        assert winner in list(Player)
-        assert 1 <= len(runner.history) <= MAX_TURNS
+        # None when the lead is shared, which is the common ending.
+        assert winner is None or winner in players()
+        assert runner.leaders() and all(p in players() for p in runner.leaders())
+        assert 1 <= len(runner.history) <= max_turns()
 
     def test_full_game_survives_a_rotating_saboteur(self):
         """A different kind of misbehaviour every turn."""
@@ -101,8 +103,13 @@ class TestChaosSeat:
         that the engine will then grade against a real player."""
         runner = _game("phantom_accept")
         runner.run(verbose=False)
+        seats = set(runner.agents)
         for c in runner.commitments:
-            assert len(set(c.players)) == 2, "a commitment with a phantom party"
+            # Not "exactly two": a pact legitimately binds three or more. What
+            # a phantom accept must never do is invent a party or repeat one.
+            assert set(c.players) <= seats, f"phantom party in {c.players}"
+            assert len(c.players) == len(set(c.players)), f"repeated party in {c.players}"
+            assert len(c.players) >= 2, "a commitment needs two sides"
 
     def test_out_of_grammar_proposals_never_become_commitments(self):
         runner = _game("out_of_grammar")
@@ -111,7 +118,7 @@ class TestChaosSeat:
         for step in runner.history:
             for c in step.commitments:
                 assert c.commitment_type is not None
-                assert 1 <= c.valid_until_turn <= MAX_TURNS + MAX_TURNS
+                assert 1 <= c.valid_until_turn <= max_turns() + max_turns()
                 for t in (c.dmz_territories or []):
                     assert t in territories
                 if c.commitment_type == CommitmentType.SUPPORT:
@@ -124,16 +131,6 @@ class TestChaosSeat:
         for step in runner.history:
             # Every seat still gets orders adjudicated, spam or no spam.
             assert step.orders is not None
-
-    def test_a_liar_is_refuted_not_believed(self):
-        """The chaos seat accuses somebody every turn. The engine grades the
-        claims, so a false one must come back REFUTED."""
-        runner = _game("garbage_orders", seed=2)
-        runner.run(verbose=False)
-        accusations = [m for step in runner.history for m in step.messages
-                       if m.broadcast_kind == "BETRAYED" and m.sender == Player.RED]
-        assert accusations, "the chaos seat never accused anyone"
-        assert any(m.engine_verdict == "REFUTED" for m in accusations)
 
 
 class TestGrammarGate:

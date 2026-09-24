@@ -48,7 +48,11 @@ select {
   background: var(--panel-2); border: 1px solid var(--line);
   border-radius: var(--r); padding: 5px 8px;
 }
-select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+input.sm {
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: var(--r); padding: 5px 8px; width: 70px;
+}
+select:focus, input:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 a { color: var(--accent); }
 
 /* ── shell ───────────────────────────────────────────────────────── */
@@ -100,13 +104,23 @@ aside {
   font: 700 9px var(--mono); text-anchor: middle; dominant-baseline: central;
   pointer-events: none;
 }
+/* Owner letter, so ownership is not carried by colour alone. */
+.nowner {
+  font: 700 8px var(--mono); text-anchor: middle; dominant-baseline: central;
+  pointer-events: none; opacity: .75;
+}
 .arrow { fill: none; stroke-width: 2.2; }
 .arrow.ok { stroke: var(--good); }
 .arrow.no { stroke: var(--bad); stroke-dasharray: 5 4; }
 .arrow.sup { stroke: var(--accent); stroke-width: 1.4; stroke-dasharray: 3 3; opacity: .8; }
 
 /* ── scores ──────────────────────────────────────────────────────── */
-.scores { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 12px; }
+/* auto-fit, not repeat(4): the table seats 2-8. */
+.scores { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+          gap: 8px; margin-top: 12px; }
+/* 7 subjects x 4 promise types at a full table, so cap and scroll. */
+.belief-scroll { max-height: 46vh; overflow-y: auto; }
+.belief-scroll tr.grp td { border-top: 1px solid var(--line-2); }
 .score {
   background: var(--panel); border: 1px solid var(--line);
   border-radius: var(--r); padding: 9px 11px; cursor: pointer; text-align: left;
@@ -240,3 +254,20 @@ th:first-child, td:first-child { text-align: left; }
 .win i { flex: 1; background: var(--line-2); border-radius: 1px 1px 0 0; min-height: 2px; }
 .win i.best { background: var(--accent); }
 .win i.breaks { background: var(--bad); }
+
+/* ── verbose mode ────────────────────────────────────────────────── */
+/* The per-agent replay needs room for a formula line without wrapping. */
+main.verbose { grid-template-columns: minmax(0, 1fr) 600px; }
+main.verbose.detailed { grid-template-columns: minmax(0, 1fr) 560px 460px; }
+@media (max-width: 1100px) { main.verbose, main.verbose.detailed { grid-template-columns: 1fr; } }
+
+.think { border: 1px solid var(--line); border-radius: var(--r); margin-bottom: 12px; }
+.think-head {
+  display: flex; align-items: center; gap: 7px; font-size: 12px;
+  padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--panel-2);
+  border-radius: var(--r) var(--r) 0 0;
+}
+.think > .step { margin: 10px 4px 0 14px; }
+.think > .step:last-child { margin-bottom: 12px; }
+.think .card { background: var(--bg); }
+.chip-row button { padding: 3px 9px; font-size: 11px; }

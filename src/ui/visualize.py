@@ -1,9 +1,9 @@
 import networkx as nx
 import matplotlib.pyplot as plt
-from src.engine.board import ADJACENCY, is_supply_center
+from src.engine.board import adjacency, is_supply_center
 
 G = nx.Graph()
-for node, neighbors in ADJACENCY.items():
+for node, neighbors in adjacency().items():
     for n in neighbors:
         G.add_edge(node, n)
 

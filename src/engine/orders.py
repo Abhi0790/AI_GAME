@@ -1,8 +1,9 @@
 from typing import List, Set, Tuple
 import itertools
 import random
+import zlib
 from src.common.schemas import GameState, Order, OrderType, Player, Unit
-from src.engine.board import get_adjacent
+from src.engine.board import active, get_adjacent
 
 def generate_orders_for_unit(state: GameState, unit: Unit) -> List[Order]:
     orders = []
@@ -35,8 +36,10 @@ def generate_orders_for_unit(state: GameState, unit: Unit) -> List[Order]:
 
 
 def _signature(state: GameState) -> Tuple:
-    """Everything order generation depends on: who is standing where."""
-    return tuple(sorted((u.territory, u.player.value) for u in state.units))
+    """Everything order generation depends on: who is standing where, and on
+    which map. Two boards can share territory names and differ in adjacency."""
+    return (tuple(sorted((u.territory, u.player.value) for u in state.units)),
+            active().fingerprint)
 
 
 # Enumeration is pure in (occupancy, player) and the planner asks for the same
@@ -50,6 +53,9 @@ _CACHE_LIMIT = 256
 # tractable at the opening, so past the cap the set is sampled instead of
 # enumerated — the whole-hold set and every single-unit action are always kept,
 # because those are the ones a human would check first.
+#
+# The sample is seeded from the position, so the cache is a pure function and
+# consuming it never shifts the game's random stream.
 #
 # ponytail: uniform sampling above the cap. If late-game play looks weak,
 # bias the sample by the opponent model before making the cap bigger.
@@ -84,8 +90,9 @@ def generate_all_order_sets(state: GameState, player: Player) -> List[List[Order
                     if tuple(comb) not in seen:
                         seen.add(tuple(comb))
                         result.append(comb)
+            rng = random.Random(zlib.crc32(repr((key[0][0], player.value)).encode()))
             while len(result) < MAX_ORDER_SETS:
-                comb = [random.choice(opts) for opts in unit_orders]
+                comb = [rng.choice(opts) for opts in unit_orders]
                 if tuple(comb) not in seen:
                     seen.add(tuple(comb))
                     result.append(comb)

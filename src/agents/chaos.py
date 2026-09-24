@@ -24,7 +24,7 @@ from src.common.schemas import (
     Player, GameState, Order, OrderType, Commitment, Message, MessageType,
     CommitmentType, DecisionTrace, BeliefSnapshot,
 )
-from src.engine.board import get_all_territories, get_adjacent
+from src.engine.board import get_all_territories, get_adjacent, players
 
 MODES = ["garbage_orders", "contradictory", "silent", "phantom_accept",
          "spam_proposals", "out_of_grammar"]
@@ -141,21 +141,8 @@ class ChaosAgent:
     def observe_orders(self, orders):
         pass
 
-    def receive_gossip(self, msg):
-        pass
-
     def predict_keep(self, state, commitment, subject) -> float:
         return 0.5
-
-    def consider_broadcast(self, state, outcomes) -> List[Message]:
-        if self._mode_for_turn(state.turn) == "silent":
-            return []
-        # Accuse a random player of a betrayal that probably never happened.
-        return [Message(
-            id=str(uuid.uuid4()), sender=self.player, receiver=None,
-            message_type=MessageType.BROADCAST, broadcast_kind="BETRAYED",
-            broadcast_target=self._other(), commitment_type=CommitmentType.ALLIANCE,
-            truthful=False)]
 
     def beliefs(self) -> List[BeliefSnapshot]:
         return []
@@ -168,7 +155,7 @@ class ChaosAgent:
 
     # ── helpers ─────────────────────────────────────────────────────────
     def _other(self) -> Player:
-        return self.rng.choice([p for p in Player if p != self.player])
+        return self.rng.choice([p for p in players() if p != self.player])
 
     def _junk_proposal(self, state: GameState) -> Message:
         return Message(

@@ -1,5 +1,5 @@
 import React from "react";
-import { COLOR, fmt, pct } from "../constants.js";
+import { COLOR, fmt, pct, orderText } from "../constants.js";
 
 const Empty = ({ children }) => <div className="empty">{children}</div>;
 
@@ -47,7 +47,6 @@ export function LogPanel({ history, upto }) {
       let cls = "line mut";
       if (/Commitment created/.test(e)) cls = "line good";
       else if (/Pact dissolved/.test(e)) cls = "line bad";
-      else if (/BROADCAST|GOSSIP/.test(e)) cls = "line warn";
       else if (/Dislodged|Removal/.test(e)) cls = "line bad";
       else if (/Move succeeds|Build/.test(e)) cls = "line";
       rows.push(
@@ -86,15 +85,7 @@ export function TalksPanel({ history, upto }) {
           if (m.type === "Accept") cls = "line good";
           else if (m.type === "Counter") cls = "line warn";
           else if (m.type === "Threat") cls = "line bad";
-          else if (m.type === "Broadcast") {
-            // Three verdicts now: proved, disproved, and unfalsifiable —
-            // the last is where lying actually lives.
-            cls = m.verdict === "CONFIRMED" ? "line warn" : "line bad";
-            note =
-              m.verdict === "CONFIRMED" ? <span className="tag kept">confirmed</span>
-              : m.verdict === "REFUTED" ? <span className="tag broke">refuted</span>
-              : <span className="tag lie">unverifiable{m.truthful === false ? " · lie" : ""}</span>;
-          } else if (accepted.has(m.id)) {
+          else if (accepted.has(m.id)) {
             note = <span className="tag kept">accepted</span>;
           }
           return (
@@ -256,15 +247,30 @@ export function WhyPanel({ history, upto }) {
               </tbody>
             </table>
           )}
+          {!!t.forfeit_rows?.length && (
+            <table>
+              <thead>
+                <tr>
+                  <th>forfeits signed value</th><th>partner</th>
+                  <th>price</th><th>left</th><th>cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {t.forfeit_rows.map((r, i) => (
+                  <tr key={i}>
+                    <td>{r.commitment}</td>
+                    <td>{r.partner}</td>
+                    <td className="num">{fmt(r.signed_price, 3)}</td>
+                    <td className="num">{fmt(r.fraction_remaining)}</td>
+                    <td className="num">{fmt(r.amount, 3)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
           <p className="mono" style={{ marginTop: 6 }}>
             orders:{" "}
-            {(t.orders ?? [])
-              .map((o) =>
-                o.order_type === "Hold" ? `${o.unit_territory} H`
-                  : o.order_type === "Move" ? `${o.unit_territory}→${o.target}`
-                  : `${o.unit_territory} S ${o.supported_from ? o.supported_from + "→" : ""}${o.target}`
-              )
-              .join(", ") || "—"}
+            {(t.orders ?? []).map(orderText).join(", ") || "—"}
           </p>
           <p>
             {t.search} · {t.nodes} adjudications · {t.candidates} candidates kept,{" "}
@@ -280,12 +286,60 @@ export function WhyPanel({ history, upto }) {
 
 export function CalibPanel({ game, history }) {
   const bins = game?.reliability ?? [];
-  if (!bins.length)
+  const rev = game?.reversals ?? {};
+  if (!bins.length && !rev.n)
     return <Empty>Nothing graded yet — a promise has to be made and then tested.</Empty>;
 
   const last = history[history.length - 1];
   return (
     <>
+      {!!rev.n && (
+        <div className="card">
+          <h4>Does this agent agree with itself?</h4>
+          <p>
+            {pct(rev.rate)} of {rev.n} priced deals were signed and then, in the
+            same turn, worth more broken than kept. The negotiator prices a deal
+            assuming the partner honours it; the planner picks orders against a
+            partner sampled from what they usually do. Both are this agent.
+          </p>
+          <table>
+            <thead>
+              <tr><th>promise</th><th>reversed</th><th>n</th></tr>
+            </thead>
+            <tbody>
+              {Object.entries(rev.by_kind ?? {}).map(([kind, [n, b, r]]) => (
+                <tr key={kind}>
+                  <td>{kind}</td>
+                  <td
+                    className="num"
+                    style={{ color: r < 0.2 ? "var(--good)" : r < 0.5 ? "var(--warn)" : "var(--bad)" }}
+                  >
+                    {pct(r)}
+                  </td>
+                  <td className="num">{n}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!!Object.keys(rev.by_persona ?? {}).length && (
+            <table>
+              <thead>
+                <tr><th>persona</th><th>reversed</th><th>n</th></tr>
+              </thead>
+              <tbody>
+                {Object.entries(rev.by_persona).map(([name, [n, b, r]]) => (
+                  <tr key={name}>
+                    <td>{name}</td>
+                    <td className="num">{pct(r)}</td>
+                    <td className="num">{n}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+      {!!bins.length && (
       <div className="card">
         <h4>Is P(keeps) worth anything?</h4>
         {game.brier != null && (
@@ -315,6 +369,7 @@ export function CalibPanel({ game, history }) {
           </tbody>
         </table>
       </div>
+      )}
       {last && !!Object.keys(last.nodes ?? {}).length && (
         <div className="card">
           <h4>Search cost, last turn</h4>

@@ -1,9 +1,12 @@
+import zlib
 from typing import List, Dict, Tuple, Set, Optional
 from src.common.schemas import (
     GameState, Order, OrderType, Player, Commitment, CommitmentType, Unit,
     CommitmentOutcome, exchange_leg_due,
 )
-from src.engine.board import is_adjacent, is_supply_center, get_all_territories
+from src.engine.board import (
+    is_adjacent, is_supply_center, get_all_territories, players, home_builds, home_centers,
+)
 
 class ResolutionLog:
     def __init__(self):
@@ -25,18 +28,38 @@ def _gave_support(orders: List[Order], supporter: Player,
     )
 
 
+def _shuffle_key(name: str, player: Player, turn: int):
+    """A stable pseudo-random order for a square or unit.
+
+    Builds and disbands must not follow territory or creation order -- that was
+    worth 0.46 of a centre per seat. Drawing from `random` instead coupled them
+    to the search: the planner resolves thousands of hypothetical autumns, so
+    search effort perturbed the stream that decided real builds. crc32 is
+    stable across processes, unlike hash() under PYTHONHASHSEED.
+    """
+    return zlib.crc32(f"{name}|{player.value}|{turn}".encode())
+
+
 def verify_commitments(state: GameState, commitments: List[Commitment], orders: List[Order]) -> List[CommitmentOutcome]:
+    if not commitments:
+        return []
     outcomes = []
 
-    # What an alliance protects (slide 4): "neither moves into the other's
-    # units or centres". Occupied squares plus owned supply centres — NOT
-    # every territory the player has ever passed through.
-    player_territories = {p: set() for p in Player}
-    for t, owner in state.supply_centers.items():
-        if owner:
-            player_territories[owner].add(t)
-    for u in state.units:
-        player_territories[u.player].add(u.territory)
+    # What an alliance protects: occupied squares plus owned supply centres.
+    # Built lazily -- only the ALLIANCE branch reads it, and building it
+    # unconditionally was the hottest line in the profile.
+    player_territories = None
+
+    def territories_of(p):
+        nonlocal player_territories
+        if player_territories is None:
+            player_territories = {q: set() for q in players()}
+            for t, owner in state.supply_centers.items():
+                if owner:
+                    player_territories[owner].add(t)
+            for u in state.units:
+                player_territories[u.player].add(u.territory)
+        return player_territories[p]
 
     for c in commitments:
         broken_by = set()
@@ -75,7 +98,7 @@ def verify_commitments(state: GameState, commitments: List[Commitment], orders: 
                 if o.order_type != OrderType.MOVE or o.player not in c.players:
                     continue
                 for other in c.players:
-                    if other != o.player and o.target in player_territories[other]:
+                    if other != o.player and o.target in territories_of(other):
                         broken_by.add(o.player)
                         break
 
@@ -138,6 +161,10 @@ def _adjudicate_moves(valid_orders: Dict[str, Order], log: ResolutionLog
         won by the stronger, or it bounces);
       * a unit whose own move bounces is not dislodged by whoever was
         following it — the follower bounces instead.
+
+    A dislodged unit gives no support. Dislodgement is only known once the
+    fixpoint has settled, so the whole thing runs again with that support
+    voided, until the set of voided supports stops growing.
     """
     moves = {loc: o for loc, o in valid_orders.items() if o.order_type == OrderType.MOVE}
 
@@ -155,7 +182,34 @@ def _adjudicate_moves(valid_orders: Dict[str, Order], log: ResolutionLog
             cut.add(loc)
             log.add(f"Support cut: {loc}")
 
+    voided: Set[str] = set()      # supporters found dislodged on a previous pass
+    while True:
+        succeeds, reasons, dislodged = _settle(valid_orders, moves, attackers_of,
+                                               cut | voided, log_sink=None)
+        # Support from a unit that ends up dislodged never happened.
+        newly = {loc for loc in dislodged
+                 if valid_orders[loc].order_type == OrderType.SUPPORT
+                 and loc not in cut and loc not in voided}
+        if not newly:
+            break
+        voided |= newly
+
+    for loc in sorted(voided):
+        log.add(f"Support voided: {loc} was dislodged")
+    for loc in moves:
+        if succeeds[loc]:
+            log.add(f"Move succeeds: {loc} -> {moves[loc].target}")
+            if moves[loc].target in dislodged:
+                log.add(f"Dislodged: {moves[loc].target}")
+        else:
+            log.add(reasons.get(loc, f"Bounce: {loc} -> {moves[loc].target}"))
+    return {loc for loc in moves if succeeds[loc]}, dislodged
+
+
+def _settle(valid_orders, moves, attackers_of, cut, log_sink=None):
+    """One pass of the bounce fixpoint with a fixed set of cut supports."""
     move_support: Dict[str, int] = {loc: 0 for loc in moves}
+    supporters: Dict[str, List[Player]] = {loc: [] for loc in moves}
     hold_support: Dict[str, int] = {loc: 0 for loc in valid_orders if loc not in moves}
     for loc, o in valid_orders.items():
         if o.order_type != OrderType.SUPPORT or loc in cut:
@@ -165,11 +219,16 @@ def _adjudicate_moves(valid_orders: Dict[str, Order], log: ResolutionLog
             if target_order and target_order.order_type == OrderType.MOVE \
                     and target_order.target == o.target:
                 move_support[o.supported_from] = move_support.get(o.supported_from, 0) + 1
+                supporters[o.supported_from].append(o.player)
         elif o.target in hold_support:
             hold_support[o.target] += 1
 
     strength = {loc: 1 + move_support.get(loc, 0) for loc in moves}
     defence = {loc: 1 + hold_support.get(loc, 0) for loc in hold_support}
+
+    def attack(loc: str, defender: Player) -> int:
+        """Strength against a unit: its owner's supports never help dislodge it (DATC 6.D.12)."""
+        return 1 + sum(1 for p in supporters[loc] if p != defender)
 
     succeeds = {loc: True for loc in moves}
     reasons: Dict[str, str] = {}
@@ -181,17 +240,25 @@ def _adjudicate_moves(valid_orders: Dict[str, Order], log: ResolutionLog
             if not succeeds[loc]:
                 continue
             target = o.target
+            occupant = valid_orders.get(target)
 
             # 1. Somebody else is pushing just as hard into the same square.
-            #    A rival that bounces still blocks, so every mover counts.
-            rivals = [r for r in attackers_of[target] if r != loc]
-            if any(strength[r] >= strength[loc] for r in rivals):
+            #    A rival that bounces still blocks, unless it lost a head-to-head
+            #    with the unit leaving that square (DATC 6.E.1).
+            rivals = [r for r in attackers_of[target] if r != loc and not (
+                occupant is not None and occupant.order_type == OrderType.MOVE
+                and occupant.target == r and succeeds.get(target, False))]
+            # Against a unit that stays, its owner's supports do not count here
+            # either, or they would beat a rival they cannot dislodge past (6.E.7).
+            leaving = (occupant is not None and occupant.order_type == OrderType.MOVE
+                       and occupant.target != loc and succeeds.get(target, False))
+            mine = strength[loc] if occupant is None or leaving else attack(loc, occupant.player)
+            if any(strength[r] >= mine for r in rivals):
                 succeeds[loc] = False
                 reasons[loc] = f"Bounce: {loc} -> {target} (matched by another attacker)"
                 changed = True
                 continue
 
-            occupant = valid_orders.get(target)
             if occupant is None:
                 continue
 
@@ -200,10 +267,10 @@ def _adjudicate_moves(valid_orders: Dict[str, Order], log: ResolutionLog
                 if occupant.player == o.player:
                     succeeds[loc] = False
                     reasons[loc] = f"Bounce: {loc} and {target} are friendly and cannot swap"
-                elif strength[loc] <= strength[target]:
+                elif attack(loc, occupant.player) <= strength[target]:
                     succeeds[loc] = False
                     reasons[loc] = (f"Bounce: {loc} <-> {target} head to head "
-                                    f"({strength[loc]} vs {strength[target]})")
+                                    f"({attack(loc, occupant.player)} vs {strength[target]})")
                 if not succeeds[loc]:
                     changed = True
                 continue
@@ -218,29 +285,33 @@ def _adjudicate_moves(valid_orders: Dict[str, Order], log: ResolutionLog
                 succeeds[loc] = False
                 reasons[loc] = f"Bounce: {loc} cannot dislodge friendly {target}"
                 changed = True
-            elif strength[loc] <= defence.get(target, 1):
+            elif attack(loc, occupant.player) <= defence.get(target, 1):
                 succeeds[loc] = False
                 reasons[loc] = (f"Bounce: {loc} -> {target} "
-                                f"(attack {strength[loc]} <= defence {defence.get(target, 1)})")
+                                f"(attack {attack(loc, occupant.player)} <= defence {defence.get(target, 1)})")
                 changed = True
 
     dislodged: Set[str] = set()
     for loc in moves:
-        if succeeds[loc]:
-            log.add(f"Move succeeds: {loc} -> {moves[loc].target}")
-            target = moves[loc].target
-            occupant = valid_orders.get(target)
-            if occupant is not None and not (occupant.order_type == OrderType.MOVE
-                                             and succeeds.get(target)):
-                dislodged.add(target)
-                log.add(f"Dislodged: {target}")
-        else:
-            log.add(reasons.get(loc, f"Bounce: {loc} -> {moves[loc].target}"))
+        if not succeeds[loc]:
+            continue
+        target = moves[loc].target
+        occupant = valid_orders.get(target)
+        if occupant is not None and not (occupant.order_type == OrderType.MOVE
+                                         and succeeds.get(target)):
+            dislodged.add(target)
 
-    return {loc for loc in moves if succeeds[loc]}, dislodged
+    return succeeds, reasons, dislodged
+
+
+# Every call from anywhere. The runner reads the difference around each agent
+# call to charge that seat's total work, budgeted or not.
+resolve_calls = 0
 
 
 def resolve(state: GameState, orders: List[Order], commitments: List[Commitment] = None) -> Tuple[GameState, List[CommitmentOutcome], ResolutionLog]:
+    global resolve_calls
+    resolve_calls += 1
     if commitments is None:
         commitments = []
     log = ResolutionLog()
@@ -268,25 +339,30 @@ def resolve(state: GameState, orders: List[Order], commitments: List[Commitment]
             if is_supply_center(u.territory):
                 new_sc[u.territory] = u.player
 
-        sc_counts = {p: 0 for p in Player}
+        sc_counts = {p: 0 for p in players()}
         for owner in new_sc.values():
             if owner:
                 sc_counts[owner] += 1
 
-        player_units = {p: [] for p in Player}
+        player_units = {p: [] for p in players()}
         for u in final_units:
             player_units[u.player].append(u)
 
         final_units = []
-        for p in Player:
+        for p in players():
             units = player_units[p]
             diff = sc_counts[p] - len(units)
             if diff < 0:
                 log.add(f"Removal: {p.value} loses {-diff} units")
-                units = units[:diff]
+                # Which unit goes does not follow creation order.
+                units = sorted(
+                    units, key=lambda u: _shuffle_key(u.territory, p, state.turn))[:diff]
             elif diff > 0:
-                owned_scs = [t for t, owner in new_sc.items() if owner == p]
+                owned_scs = [t for t, owner in new_sc.items() if owner == p
+                             and (not home_builds() or t in home_centers()[p])]
                 empty_scs = [t for t in owned_scs if not any(u.territory == t for u in units)]
+                # Build site does not follow territory order.
+                empty_scs.sort(key=lambda t: _shuffle_key(t, p, state.turn))
                 for i in range(min(diff, len(empty_scs))):
                     log.add(f"Build: {p.value} builds in {empty_scs[i]}")
                     units.append(Unit(player=p, territory=empty_scs[i]))

@@ -3,13 +3,15 @@
 The DATC is the reference test set for Diplomacy adjudicators. This game has
 no fleets, coasts, convoys or retreats, so the sections covering them do not
 apply; what is left is section 6.A (illegal orders), 6.C (circular movement
-and swaps) and 6.D (supports and dislodges), which is what this file walks
+and swaps), 6.D (supports and dislodges) and 6.E (head-to-head battles), which is what this file walks
 through on the twelve-territory board.
 
-Adjacency used below (src/engine/board.py):
-    R1: R2 Y2 C1      R2: R1 B1 N1      B1: R2 B2 N1      B2: B1 G1 C2
-    G1: B2 G2 C2      G2: G1 Y1 N2      Y1: G2 Y2 N2      Y2: Y1 R1 C1
-    N1: R2 B1 C1 C2   N2: G2 Y1 C1 C2   C1: R1 Y2 N1 N2   C2: B2 G1 N1 N2
+Adjacency used below — the default board, `ring_board(4)`:
+    R1: R2 Y2 C2      R2: R1 B1 N1      B1: R2 B2 N1      B2: B1 G1 C1
+    G1: B2 G2 C1      G2: G1 Y1 N2      Y1: G2 Y2 N2      Y2: Y1 R1 C2
+    N1: R2 B1 C1 C2   N2: G2 Y1 C1 C2   C1: B2 G1 N1 N2   C2: Y2 R1 N1 N2
+`test_board_adjacency_is_symmetric` reads the real thing, so this is a map for
+the reader, not a second source of truth.
 """
 
 import pytest
@@ -19,7 +21,11 @@ from src.common.schemas import (
     GameState, Order, OrderType, Player, Unit, Commitment, CommitmentType,
 )
 from src.engine.adjudicator import resolve
-from src.engine.board import get_all_territories, get_adjacent, ADJACENCY
+import random
+
+from src.engine.board import (
+    get_all_territories, get_adjacent, adjacency, players, active,
+)
 from src.engine.orders import generate_all_order_sets
 
 TERRITORIES = get_all_territories()
@@ -110,15 +116,15 @@ class TestMovementCycles:
         assert positions(new) == {"R1": R, "R2": B}
 
     def test_6C_an_illegal_support_does_not_win_a_head_to_head(self):
-        """C1 borders R1 but not R2, so it cannot support an attack into R2.
+        """C2 borders R1 but not R2, so it cannot support an attack into R2.
         The order is dropped and the head-to-head bounces as usual."""
-        state = board((R, "R1"), (B, "R2"), (R, "C1"))
+        state = board((R, "R1"), (B, "R2"), (R, "C2"))
         new, _o, _l = resolve(state, [
             move(R, "R1", "R2"),
             move(B, "R2", "R1"),
-            support_move(R, "C1", "R1", "R2"),
+            support_move(R, "C2", "R1", "R2"),
         ])
-        assert positions(new) == {"R1": R, "R2": B, "C1": R}
+        assert positions(new) == {"R1": R, "R2": B, "C2": R}
 
     def test_6C_head_to_head_with_legal_support_dislodges(self):
         state = board((R, "R2"), (B, "N1"), (R, "B1"))
@@ -224,6 +230,28 @@ class TestSupportsAndDislodges:
         ])
         assert positions(new)["N1"] == G   # strength 2 beats two strength-1s
 
+    def test_6D_own_support_cannot_dislodge_own_unit(self):
+        """6.D.12 — supporting a foreign attack on your own unit does not count."""
+        s = board((R, "R1"), (B, "R2"), (R, "C2"))
+        out = resolve(s, [hold(R, "R1"), move(B, "R2", "R1"),
+                          support_move(R, "C2", "R2", "R1")])[0]
+        assert positions(out) == {"R1": R, "R2": B, "C2": R}
+
+    def test_6D_foreign_support_is_still_counted_by_others(self):
+        """6.D.14 — with a support of its own on top, the attack does dislodge."""
+        s = board((R, "R1"), (B, "R2"), (R, "C2"), (G, "Y2"))
+        out = resolve(s, [hold(R, "R1"), move(B, "R2", "R1"),
+                          support_move(R, "C2", "R2", "R1"),
+                          support_move(G, "Y2", "R2", "R1")])[0]
+        assert positions(out) == {"R1": B, "C2": R, "Y2": G}
+
+    def test_6E_own_support_does_not_win_a_head_to_head_against_own_unit(self):
+        """The same rule in a head-to-head: Red's support for Blue does not beat Red."""
+        s = board((R, "R1"), (B, "R2"), (R, "C2"))
+        out = resolve(s, [move(R, "R1", "R2"), move(B, "R2", "R1"),
+                          support_move(R, "C2", "R2", "R1")])[0]
+        assert positions(out) == {"R1": R, "R2": B, "C2": R}
+
     def test_6D_support_hold_for_a_unit_that_moves_does_not_help_it(self):
         state = board((R, "R2"), (R, "B1"), (B, "N1"), (B, "C2"))
         new, _o, _l = resolve(state, [
@@ -234,6 +262,116 @@ class TestSupportsAndDislodges:
         ])
         assert positions(new)["N1"] == R
         assert positions(new)["C1"] == B
+
+
+# ── 6.E — head-to-head battles ──────────────────────────────────────────
+
+class TestHeadToHead:
+    def test_6E_dislodged_unit_has_no_effect_on_attackers_area(self):
+        """6.E.1 — a unit beaten head to head does not block the square its
+        attacker left, so a third unit walks in."""
+        s = board((R, "R2"), (R, "B1"), (B, "N1"), (G, "R1"))
+        out = resolve(s, [move(R, "R2", "N1"), support_move(R, "B1", "R2", "N1"),
+                          move(B, "N1", "R2"), move(G, "R1", "R2")])[0]
+        assert positions(out) == {"N1": R, "B1": R, "R2": G}
+
+    def test_6E_head_to_head_bounce_still_blocks(self):
+        """An equal head-to-head bounces both, and the square stays blocked."""
+        s = board((R, "R2"), (B, "N1"), (G, "R1"))
+        out = resolve(s, [move(R, "R2", "N1"), move(B, "N1", "R2"),
+                          move(G, "R1", "R2")])[0]
+        assert positions(out) == {"R2": R, "N1": B, "R1": G}
+
+
+def _map(edges, homes):
+    """A small board with the DATC's own geography, so a case reads as published."""
+    from src.engine.board import Board
+    adj = {}
+    for e in edges.split():
+        a, b = e.split("-")
+        adj.setdefault(a, []).append(b)
+        adj.setdefault(b, []).append(a)
+    return Board(adjacency=adj, supply_centers=[t for ts in homes.values() for t in ts],
+                 home_centers=homes, win_centers=2)
+
+
+# The North Sea and its neighbours, plus Berlin/Munich. Armies stand in for fleets.
+NORTH_SEA = _map("NTH-NWG NTH-NOR NTH-SKA NTH-DEN NTH-HEL NTH-HOL NTH-BEL NTH-ENG NTH-YOR "
+                 "NTH-EDI NWG-NOR NWG-EDI NOR-SKA SKA-DEN HEL-HOL HEL-KIE HEL-DEN HOL-BEL "
+                 "HOL-KIE HOL-RUH BEL-ENG BEL-RUH YOR-EDI KIE-RUH KIE-DEN KIE-BER KIE-MUN "
+                 "BER-MUN MUN-RUH",
+                 {G: ["EDI"], R: ["KIE"], Y: ["NOR"], B: ["BEL"]})
+BALKANS = _map("BUD-VIE BUD-GAL BUD-RUM BUD-SER BUD-TRI VIE-GAL VIE-TRI RUM-GAL RUM-SER SER-TRI",
+               {R: ["TRI"], B: ["VIE"], G: ["SER"], Y: ["GAL"]})
+
+
+def _datc(board_, units, orders):
+    from src.engine.board import use_board
+    with use_board(board_):
+        state = GameState(turn=1, units=[Unit(player=p, territory=t) for p, t in units],
+                          supply_centers={t: None for t in board_.supply_centers},
+                          territory_owners={t: None for t in board_.territories})
+        return positions(resolve(state, orders)[0])
+
+
+class TestHeadToHeadDATC:
+    """6.E on the published geography. Germany R, France B, England G, Russia Y;
+    in the Balkans case Austria R, Italy B, Russia Y."""
+
+    def test_6E2_no_self_dislodgement_in_head_to_head(self):
+        units = [(R, "BER"), (R, "KIE"), (R, "MUN")]
+        orders = [move(R, "BER", "KIE"), move(R, "KIE", "BER"), support_move(R, "MUN", "BER", "KIE")]
+        assert _datc(NORTH_SEA, units, orders) == {t: p for p, t in units}
+
+    def test_6E3_no_help_in_dislodging_own_unit(self):
+        units = [(R, "BER"), (R, "MUN"), (G, "KIE")]
+        orders = [move(R, "BER", "KIE"), support_move(R, "MUN", "KIE", "BER"), move(G, "KIE", "BER")]
+        assert _datc(NORTH_SEA, units, orders) == {t: p for p, t in units}
+
+    def test_6E6_not_dislodged_because_of_own_support_still_has_effect(self):
+        units = [(R, "HOL"), (R, "HEL"), (B, "NTH"), (B, "BEL"), (B, "ENG"), (Y, "KIE"), (Y, "RUH")]
+        orders = [move(R, "HOL", "NTH"), support_move(R, "HEL", "HOL", "NTH"),
+                  move(B, "NTH", "HOL"), support_move(B, "BEL", "NTH", "HOL"),
+                  support_move(B, "ENG", "HOL", "NTH"),
+                  support_move(Y, "KIE", "RUH", "HOL"), move(Y, "RUH", "HOL")]
+        assert _datc(NORTH_SEA, units, orders) == {t: p for p, t in units}
+
+    def test_6E7_no_self_dislodgement_with_beleaguered_garrison(self):
+        units = [(G, "NTH"), (G, "YOR"), (R, "HOL"), (R, "HEL"), (Y, "SKA"), (Y, "NOR")]
+        orders = [hold(G, "NTH"), support_move(G, "YOR", "NOR", "NTH"),
+                  support_move(R, "HOL", "HEL", "NTH"), move(R, "HEL", "NTH"),
+                  support_move(Y, "SKA", "NOR", "NTH"), move(Y, "NOR", "NTH")]
+        assert _datc(NORTH_SEA, units, orders) == {t: p for p, t in units}
+
+    def test_6E8_beleaguered_garrison_and_head_to_head(self):
+        units = [(G, "NTH"), (G, "YOR"), (R, "HOL"), (R, "HEL"), (Y, "SKA"), (Y, "NOR")]
+        orders = [move(G, "NTH", "NOR"), support_move(G, "YOR", "NOR", "NTH"),
+                  support_move(R, "HOL", "HEL", "NTH"), move(R, "HEL", "NTH"),
+                  support_move(Y, "SKA", "NOR", "NTH"), move(Y, "NOR", "NTH")]
+        assert _datc(NORTH_SEA, units, orders) == {t: p for p, t in units}
+
+    def test_6E9_almost_self_dislodgement_the_garrison_leaves(self):
+        """The same attack succeeds once the garrison moves out: the support counts again."""
+        units = [(G, "NTH"), (G, "YOR"), (R, "HOL"), (R, "HEL"), (Y, "SKA"), (Y, "NOR")]
+        orders = [move(G, "NTH", "NWG"), support_move(G, "YOR", "NOR", "NTH"),
+                  support_move(R, "HOL", "HEL", "NTH"), move(R, "HEL", "NTH"),
+                  support_move(Y, "SKA", "NOR", "NTH"), move(Y, "NOR", "NTH")]
+        assert _datc(NORTH_SEA, units, orders) == {
+            "NWG": G, "YOR": G, "HOL": R, "HEL": R, "SKA": Y, "NTH": Y}
+
+    def test_6E12_support_on_attack_on_own_unit_still_prevents(self):
+        """Austria's support cannot dislodge Austria, but it still blocks Russia."""
+        units = [(R, "BUD"), (R, "SER"), (B, "VIE"), (Y, "GAL"), (Y, "RUM")]
+        orders = [move(R, "BUD", "RUM"), support_move(R, "SER", "VIE", "BUD"),
+                  move(B, "VIE", "BUD"), move(Y, "GAL", "BUD"), support_move(Y, "RUM", "GAL", "BUD")]
+        assert _datc(BALKANS, units, orders) == {t: p for p, t in units}
+
+    def test_6E13_three_way_beleaguered_garrison(self):
+        units = [(G, "EDI"), (G, "YOR"), (B, "BEL"), (B, "ENG"), (R, "NTH"), (Y, "NWG"), (Y, "NOR")]
+        orders = [support_move(G, "EDI", "YOR", "NTH"), move(G, "YOR", "NTH"),
+                  move(B, "BEL", "NTH"), support_move(B, "ENG", "BEL", "NTH"), hold(R, "NTH"),
+                  move(Y, "NWG", "NTH"), support_move(Y, "NOR", "NWG", "NTH")]
+        assert _datc(NORTH_SEA, units, orders) == {t: p for p, t in units}
 
 
 # ── Commitment grading ──────────────────────────────────────────────────
@@ -271,7 +409,7 @@ class TestCommitmentGrading:
 
 # ── Property tests ──────────────────────────────────────────────────────
 
-_players = st.sampled_from(list(Player))
+_players = st.sampled_from(players())
 _territories = st.sampled_from(TERRITORIES)
 
 
@@ -354,6 +492,123 @@ def test_holding_everything_changes_nothing(data):
 
 
 def test_board_adjacency_is_symmetric():
-    for t, neighbours in ADJACENCY.items():
+    adj = adjacency()
+    for t, neighbours in adj.items():
         for n in neighbours:
-            assert t in ADJACENCY[n], f"{t} -> {n} is one-way"
+            assert t in adj[n], f"{t} -> {n} is one-way"
+
+
+# ── symmetry: the engine must not read meaning into list order ───────────
+
+def _sigma_and_pi():
+    """The board's reflection, and the seat permutation it induces."""
+    b = active()
+    sigma = b.symmetries[0]
+    home_of = {t: p for p, hs in b.home_centers.items() for t in hs}
+    pi = {p: home_of[sigma[hs[0]]] for p, hs in b.home_centers.items()}
+    return sigma, pi
+
+
+def _mirror_state(st, sigma, pi):
+    return GameState(
+        turn=st.turn,
+        units=[Unit(player=pi[u.player], territory=sigma[u.territory])
+               for u in st.units],
+        supply_centers={sigma[t]: (pi[o] if o else None)
+                        for t, o in st.supply_centers.items()},
+        territory_owners={sigma[t]: (pi[o] if o else None)
+                          for t, o in st.territory_owners.items()})
+
+
+def _mirror_order(o, sigma, pi):
+    return Order(player=pi[o.player], unit_territory=sigma[o.unit_territory],
+                 order_type=o.order_type,
+                 target=sigma[o.target] if o.target else None,
+                 supported_from=sigma[o.supported_from] if o.supported_from else None)
+
+
+@pytest.mark.parametrize("turn", [1, 2])
+def test_adjudication_is_equivariant_under_the_board_symmetry(turn):
+    """Mirror a position and its orders, and the outcome must mirror too.
+
+    Run at both parities, since builds and removals only fire on even turns.
+
+    Compares how many units each seat ends with, not which squares they sit on:
+    build sites and disbands are deliberately random, so exact positions cannot
+    mirror. That makes this a guard on movement, capture and dislodgement --
+    NOT on build-site fairness, which `test_build_site_is_not_decided_by_
+    territory_order` covers instead.
+    """
+    sigma, pi = _sigma_and_pi()
+    rng = random.Random(turn)
+    terr = get_all_territories()
+
+    for trial in range(150):
+        squares = rng.sample(terr, rng.randint(2, 6))
+        units = [Unit(player=rng.choice(players()), territory=t) for t in squares]
+        owners = {t: rng.choice(players() + [None]) for t in terr}
+        st = GameState(turn=turn, units=units,
+                       supply_centers=dict(owners),
+                       territory_owners={t: None for t in terr})
+        orders = []
+        for u in units:
+            adj = get_adjacent(u.territory)
+            kind = rng.choice(["hold", "move", "support"])
+            if kind == "move":
+                orders.append(move(u.player, u.territory, rng.choice(adj)))
+            elif kind == "support":
+                orders.append(support_hold(u.player, u.territory, rng.choice(adj)))
+            else:
+                orders.append(hold(u.player, u.territory))
+
+        # Builds and removals are deliberately randomised, so compare the
+        # multiset of (owner, was_built) rather than exact squares: what must
+        # mirror is how many units each seat ends with, not which coin landed.
+        seed = rng.randrange(1 << 30)
+        random.seed(seed)
+        direct, _o, _l = resolve(st, orders)
+        random.seed(seed)
+        mirrored, _o, _l = resolve(_mirror_state(st, sigma, pi),
+                                   [_mirror_order(o, sigma, pi) for o in orders])
+
+        want = sorted(pi[p].value for p in (u.player for u in direct.units))
+        got = sorted(u.player.value for u in mirrored.units)
+        assert want == got, (
+            f"turn {turn} trial {trial}: mirrored position gave {got}, "
+            f"mirror of the original is {want}")
+
+
+class TestDislodgedSupport:
+    """6.D.17 — a dislodged unit gives no support.
+
+    The attack that dislodges the supporter comes OUT OF the very square the
+    support is aimed at, so the ordinary cut rule does not apply. Only the
+    dislodgement voids it.
+    """
+
+    def test_support_from_a_dislodged_unit_does_not_count(self):
+        # Red C2->N1 at strength 2 thanks to R2; Blue dislodges R2 from N1;
+        # Green contests N1 at strength 1. Voiding the support makes it 1 v 1.
+        state = board((R, "C2"), (R, "R2"), (B, "N1"), (B, "B1"), (G, "C1"))
+        new, _o, _l = resolve(state, [
+            move(R, "C2", "N1"),
+            support_move(R, "R2", "C2", "N1"),
+            move(B, "N1", "R2"),
+            support_move(B, "B1", "N1", "R2"),
+            move(G, "C1", "N1"),
+        ])
+        pos = positions(new)
+        assert pos.get("R2") == B, "the supporter should have been dislodged"
+        assert "N1" not in pos, f"N1 should be empty, got {pos.get('N1')}"
+
+    def test_a_surviving_supporter_still_counts(self):
+        # Same shape, but Blue's attack on the supporter is unsupported, so R2
+        # holds and its support stands.
+        state = board((R, "C2"), (R, "R2"), (B, "N1"), (G, "C1"))
+        new, _o, _l = resolve(state, [
+            move(R, "C2", "N1"),
+            support_move(R, "R2", "C2", "N1"),
+            move(B, "N1", "R2"),
+            move(G, "C1", "N1"),
+        ])
+        assert positions(new).get("N1") == R, "unbroken support should still win N1"

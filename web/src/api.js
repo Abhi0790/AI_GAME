@@ -20,5 +20,7 @@ export const getPending = (id) => fetch(`/api/game/${id}/pending`).then(json);
 export const stepGame = (id, turn) => post(`/api/game/${id}/step`, turn);
 export const getReplay = (id) => fetch(`/api/game/${id}/replay`).then(json);
 export const saveReplay = (id) => post(`/api/game/${id}/save`);
+export const listReplays = () => fetch("/api/replays").then(json);
+export const loadReplay = (name) => fetch(`/api/replays/${name}`).then(json);
 export const inspect = (id, seat) =>
   fetch(`/api/game/${id}/inspect/${seat}`).then(json);

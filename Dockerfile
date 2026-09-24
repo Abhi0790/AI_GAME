@@ -50,7 +50,9 @@ FROM source AS report
 USER app
 VOLUME ["/app/figures", "/app/data"]
 ENTRYPOINT ["python"]
-CMD ["scripts/make_figures.py", "--games", "8", "--out", "figures"]
+# MIN_GAMES games, not 8: below it every figure prints "not reportable".
+# The sweep is part of the report, so report.sh runs both.
+CMD ["scripts/report.py", "--out", "figures"]
 
 
 # ── test: the suite, including the DATC cases and property tests ────────

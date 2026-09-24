@@ -2,7 +2,8 @@
 
 Endpoints:
     GET  /                        Dashboard page
-    POST /api/game/new            Start a game; optionally take a seat
+    GET  /api/knobs               Tunable constants and persona names
+    POST /api/game/new            Start a game from a full GameConfig
     GET  /api/game/{id}/state     Current state, scores, live commitments
     GET  /api/game/{id}/pending   What the human seat has been offered
     POST /api/game/{id}/step      Advance one turn (with the human's input)
@@ -10,9 +11,12 @@ Endpoints:
     GET  /api/game/{id}/legal     Legal orders for the human's units
 """
 
+import json
 import os
+import threading
 import uuid
 import random
+from contextlib import contextmanager
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI
@@ -23,15 +27,18 @@ from pydantic import BaseModel
 from src.common.schemas import (
     Player, Order, OrderType, MessageType, describe_message, exchange_leg_due,
 )
-from src.agents.agent import Agent, HumanAgent
-from src.agents.chaos import ChaosAgent
-from src.engine.runner import GameRunner
+from src.agents.negotiation.personas import PERSONAS
+from src.common.config import GameConfig
+from src.harness import build_runner, game_setup, knob_values, read_only
 from src.engine.replay import save_replay
 from src.engine.orders import generate_orders_for_unit
 from src.engine.board import (
-    ADJACENCY, get_all_territories, get_supply_centers, WIN_CENTERS, MAX_TURNS,
+    Board, active, players, SEAT_CODES,
+    DEFAULT_SEATS, DEFAULT_HOMES_PER_PLAYER, DEFAULT_MAX_TURNS, DEFAULT_WIN_FRACTION, MIN_SEATS, MAX_SEATS,
 )
-from src.evaluation.metrics import brier_score, reliability_bins
+from src.evaluation.metrics import (
+    brier_score, reliability_bins, preference_reversals,
+)
 
 
 app = FastAPI(title="Territory Game Dashboard")
@@ -48,14 +55,9 @@ _DIST_CANDIDATES = [
 DIST = next((d for d in _DIST_CANDIDATES if os.path.isdir(d)), None)
 
 # ── In-memory game store ────────────────────────────────────────────────
+# Insertion-ordered, so the oldest game is the first key.
 _games: Dict[str, dict] = {}
-
-DEFAULT_PERSONAS = {
-    Player.RED: "Opportunist",
-    Player.BLUE: "Honest",
-    Player.GREEN: "Paranoid",
-    Player.GOLD: "Vengeful",
-}
+MAX_GAMES = 32
 
 
 def _serialise_state(state):
@@ -94,12 +96,25 @@ def _serialise_message(m):
         "reference_id": m.reference_id,
         "condition": m.condition,
         "action": m.action,
-        "broadcast_kind": m.broadcast_kind,
-        "broadcast_target": m.broadcast_target.value if m.broadcast_target else None,
-        "verdict": m.engine_verdict,
-        "truthful": m.truthful,
+        # What the sender worked out before saying it — verbose mode's
+        # whole point. None for sentences nobody priced (threats).
+        "rationale": ({k: round(v, 4) for k, v in m.rationale.items()}
+                      if m.rationale else None),
         "text": describe_message(m),
     }
+
+
+def _hidden_from(viewer) -> "callable":
+    """A deal or message is private to its parties. A spectator sees all of it;
+    a seated human must not, or the point of a private deal is lost."""
+    def hidden(obj) -> bool:
+        if viewer is None or not getattr(obj, "private", False):
+            return False
+        parties = set(getattr(obj, "players", None)
+                      or getattr(obj, "coalition", None) or [])
+        parties |= {getattr(obj, "sender", None), getattr(obj, "receiver", None)}
+        return viewer not in parties
+    return hidden
 
 
 def _serialise_commitment(c, turn=None):
@@ -118,7 +133,8 @@ def _serialise_commitment(c, turn=None):
     }
 
 
-def _serialise_history_step(step):
+def _serialise_history_step(step, viewer=None):
+    hidden = _hidden_from(viewer)
     return {
         "state": _serialise_state(step.state),
         "orders": [
@@ -141,10 +157,12 @@ def _serialise_history_step(step):
             for o in step.outcomes
         ],
         "log": step.log.events,
-        "messages": [_serialise_message(m) for m in step.messages],
+        "messages": [_serialise_message(m) for m in step.messages
+                     if not hidden(m)],
         "commitments": [_serialise_commitment(c, step.state.turn)
-                        for c in step.commitments],
+                        for c in step.commitments if not hidden(c)],
         "nodes": {p.value: n for p, n in (step.nodes or {}).items()},
+        "total_nodes": {p.value: n for p, n in (step.total_nodes or {}).items()},
         # The trust panel was dead because nothing ever sent it this.
         "beliefs": [
             {
@@ -179,6 +197,14 @@ def _serialise_history_step(step):
                      "amount": round(r[4], 3)}
                     for r in getattr(t, "penalty_rows", [])
                 ],
+                # (key, partner, signed_price, fraction_remaining, amount)
+                "forfeit_rows": [
+                    {"commitment": r[0], "partner": r[1].value,
+                     "signed_price": round(r[2], 3),
+                     "fraction_remaining": round(r[3], 3),
+                     "amount": round(r[4], 3)}
+                    for r in getattr(t, "forfeit_rows", [])
+                ],
                 "orders": [
                     {"unit_territory": o.unit_territory,
                      "order_type": o.order_type.value,
@@ -201,15 +227,27 @@ def _game_summary(g) -> dict:
         "winner": g["winner"],
         "turn": runner.state.turn,
         "max_turns": runner.max_turns,
-        "win_centers": WIN_CENTERS,
+        "win_centers": runner.win_centers,
+        # The page draws from this, not /api/board: the game has its own map.
+        "board": _board_data(g["board"]),
         "history_length": len(runner.history),
         "commitments": [_serialise_commitment(c, runner.state.turn)
-                        for c in runner.commitments],
+                        for c in runner.commitments
+                        if not _hidden_from(g["human_seat"])(c)],
         "human_seat": g["human_seat"].value if g["human_seat"] else None,
+        "config": g["config"].to_dict(),
+        # Current value of every knob, with this game's overrides applied.
+        "knobs": {**knob_values(), **g["config"].knobs},
         "personas": {p.value: getattr(a, "persona_name", "?")
                      for p, a in runner.agents.items()},
         "brier": brier_score(runner.calibration),
         "reliability": reliability_bins(runner.calibration, bins=5),
+        # The negotiator and the planner price the same deal minutes apart in
+        # the same turn, against different models of the partner. This is how
+        # often they disagreed.
+        "reversals": preference_reversals(
+            runner.reversals,
+            {p: getattr(a, "persona_name", "?") for p, a in runner.agents.items()}),
     }
 
 
@@ -227,57 +265,169 @@ async def read_root():
     return FileResponse(os.path.join(DIST, "index.html"))
 
 
+def _board_data(board) -> dict:
+    """The map as the page needs to draw it. Every game carries its own."""
+    return {
+        "territories": board.territories,
+        "supply_centers": list(board.supply_centers),
+        "adjacency": board.adjacency,
+        "players": [p.value for p in board.players],
+        # One letter per seat, so the page can label a node as well as colour it.
+        "seat_codes": {p.value: SEAT_CODES[p] for p in board.players},
+        "positions": {t: {"x": x, "y": y} for t, (x, y) in board.positions.items()},
+        "max_turns": board.max_turns,
+        "win_centers": board.win_centers,
+        "home_builds": board.home_builds,
+    }
+
+
 @app.get("/api/board")
 async def board():
-    """Static map data, so the page cannot drift out of sync with the engine."""
-    return {
-        "territories": get_all_territories(),
-        "supply_centers": get_supply_centers(),
-        "adjacency": ADJACENCY,
-        "players": [p.value for p in Player],
-        "max_turns": MAX_TURNS,
-        "win_centers": WIN_CENTERS,
-    }
+    """The default map, for a page with no game yet; otherwise read the game's."""
+    return {**_board_data(active()), "personas": list(PERSONAS),
+            "seat_colours": [p.value for p in Player]}
 
 
 class NewGame(BaseModel):
-    seed: Optional[int] = None
+    """GameConfig over the wire. Seats are colour strings ("Red"), knobs are
+    bare UPPERCASE constant names."""
+    seed: Optional[int] = None            # None -> random
+    n_seats: int = DEFAULT_SEATS
+    homes_per_player: int = DEFAULT_HOMES_PER_PLAYER
+    win_centers: Optional[int] = None     # None -> win_fraction of the centres
+    win_fraction: float = DEFAULT_WIN_FRACTION
+    max_turns: int = DEFAULT_MAX_TURNS
+    home_builds: bool = True              # False: build on any owned centre
+    seating: Optional[Dict[str, str]] = None   # {"Red": "Honest", ...}
+    search: str = "expectiminimax"
+    node_budget: int = 1500
+    negotiation_rounds: int = 3
+    rep_cost_scale: float = 1.0
     human_seat: Optional[str] = None      # "Red" etc, or None for spectating
     chaos_seat: Optional[str] = None      # put the chaos agent in a chair
-    broadcast: bool = True
-    search: str = "expectiminimax"
+    chaos_mode: Optional[str] = None
+    knobs: Dict[str, float] = {}
+
+
+REPLAY_DIR = "replays"
+
+
+@app.get("/api/replays")
+async def list_replays():
+    """Saved replay files, newest first. Version 3 and up carry their board."""
+    if not os.path.isdir(REPLAY_DIR):
+        return {"replays": []}
+    out = []
+    for name in sorted(os.listdir(REPLAY_DIR), reverse=True):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(REPLAY_DIR, name)
+        try:
+            with open(path) as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            continue
+        board = d.get("board")
+        out.append({
+            "name": name,
+            "turns": d.get("turns", len(d.get("history", []))),
+            "version": d.get("version", 1),
+            "seats": len(board["home_centers"]) if board else None,
+            "playable": board is not None,
+        })
+    return {"replays": out}
+
+
+@app.get("/api/replays/{name}")
+async def load_saved_replay(name: str):
+    """One saved replay, in the shape the history viewer already consumes."""
+    if os.path.basename(name) != name or not name.endswith(".json"):
+        return JSONResponse(status_code=400, content={"error": "bad replay name"})
+    path = os.path.join(REPLAY_DIR, name)
+    if not os.path.isfile(path):
+        return JSONResponse(status_code=404, content={"error": "no such replay"})
+    with open(path) as f:
+        d = json.load(f)
+    if not d.get("board"):
+        return JSONResponse(status_code=409, content={
+            "error": f"replay is version {d.get('version', 1)} and has no board; "
+                     "only version 3 and up can be drawn"})
+    board = Board.from_dict(d["board"])
+    return {
+        "name": name,
+        "board": _board_data(board),
+        "turns": d.get("turns", len(d.get("history", []))),
+        "history": d.get("history", []),
+        "final_state": d.get("final_state"),
+    }
+
+
+@app.get("/api/knobs")
+async def knobs():
+    """Every tunable constant and its current value, plus the persona names —
+    what a New-game form needs to offer."""
+    return {"knobs": knob_values(), "personas": list(PERSONAS)}
 
 
 @app.post("/api/game/new")
-async def new_game(cfg: NewGame = NewGame()):
-    """Create a new game. Returns the game ID."""
+def new_game(cfg: NewGame = NewGame()):
+    """Create a new game from a full GameConfig. Returns the game ID."""
+    known = knob_values()
+    unknown = sorted(k for k in cfg.knobs if k not in known)
+    if unknown:
+        return JSONResponse(status_code=400, content={
+            "error": f"unknown knobs: {', '.join(unknown)}",
+            "known": sorted(known),
+        })
+    bad = sorted(set(cfg.seating.values()) - set(PERSONAS)) if cfg.seating else []
+    if bad:
+        return JSONResponse(status_code=400, content={
+            "error": f"unknown personas: {', '.join(bad)}",
+            "known": list(PERSONAS),
+        })
+
+    d = cfg.model_dump()
+    d["seed"] = cfg.seed if cfg.seed is not None else random.randrange(1, 10 ** 6)
+    config = GameConfig.from_dict(d)
+
+    # Built up front so a bad seat count or win threshold is a 400, not a 500.
+    try:
+        board = config.make_board()
+    except (AssertionError, ValueError) as e:
+        return JSONResponse(status_code=400, content={
+            "error": f"impossible board: {e}",
+            "seats": [MIN_SEATS, MAX_SEATS],
+        })
+
     game_id = str(uuid.uuid4())[:8]
-    seed = cfg.seed if cfg.seed is not None else random.randrange(1, 10 ** 6)
-    random.seed(seed)
-
-    human = Player(cfg.human_seat) if cfg.human_seat else None
-    chaos = Player(cfg.chaos_seat) if cfg.chaos_seat else None
-
-    from src.agents.planner.planner import PlannerConfig
-    agents = []
-    for p, persona in DEFAULT_PERSONAS.items():
-        if p == human:
-            agents.append(HumanAgent(p, persona))
-        elif p == chaos:
-            agents.append(ChaosAgent(p, seed=seed))
-        else:
-            agents.append(Agent(p, persona, PlannerConfig(search=cfg.search)))
-
-    runner = GameRunner(agents, broadcast_enabled=cfg.broadcast)
+    while len(_games) >= MAX_GAMES:
+        _games.pop(next(iter(_games)))
+    with game_setup(config):
+        runner = build_runner(config)
+        rng = random.getstate()
     _games[game_id] = {
-        "runner": runner, "finished": False, "winner": None,
-        "human_seat": human, "seed": seed,
+        "runner": runner, "board": board,
+        "finished": False, "winner": None,
+        "human_seat": config.human_seat, "seed": config.seed,
+        "config": config, "lock": threading.Lock(), "rng": rng,
     }
-    return {"game_id": game_id, "seed": seed, **_game_summary(_games[game_id])}
+    return {"game_id": game_id, "seed": config.seed, **_game_summary(_games[game_id])}
 
 
 def _get(game_id: str):
     return _games.get(game_id)
+
+
+@contextmanager
+def _playing(g):
+    """This game's board, knobs and random stream. Games share the process,
+    so each keeps its own stream to stay reproducible from its seed."""
+    with game_setup(g["config"]):
+        random.setstate(g["rng"])
+        try:
+            yield
+        finally:
+            g["rng"] = random.getstate()
 
 
 @app.get("/api/game/{game_id}/state")
@@ -289,7 +439,7 @@ async def get_state(game_id: str):
 
 
 @app.get("/api/game/{game_id}/pending")
-async def pending(game_id: str):
+def pending(game_id: str):
     """Proposals waiting on the human seat, plus its legal orders.
 
     Calling this runs the turn's opening proposals but nothing else, so the
@@ -302,7 +452,8 @@ async def pending(game_id: str):
     if seat is None or g["finished"]:
         return {"proposals": [], "legal": {}}
 
-    messages = runner.begin_turn()
+    with _playing(g):
+        messages = runner.begin_turn()
     mine = [m for m in messages if m.receiver == seat
             and m.message_type in (MessageType.PROPOSE, MessageType.THREAT)]
     return {
@@ -342,7 +493,7 @@ class HumanTurn(BaseModel):
 
 
 @app.post("/api/game/{game_id}/step")
-async def step_game(game_id: str, turn: HumanTurn = HumanTurn()):
+def step_game(game_id: str, turn: HumanTurn = HumanTurn()):
     """Advance the game by one turn."""
     g = _get(game_id)
     if g is None:
@@ -351,15 +502,34 @@ async def step_game(game_id: str, turn: HumanTurn = HumanTurn()):
         return {"finished": True, "message": "Game already finished",
                 **_game_summary(g)}
 
+    # ponytail: one lock per game, non-blocking — a second step while one is
+    # running is a double-click, not a queue. game_setup is still
+    # process-global; make it thread-local if concurrent games ever bite.
+    if not g["lock"].acquire(blocking=False):
+        return JSONResponse(status_code=409,
+                            content={"error": "a step is already running"})
+    try:
+        with _playing(g):
+            return _step(g, turn)
+    finally:
+        g["lock"].release()
+
+
+def _step(g, turn: "HumanTurn"):
     runner, seat = g["runner"], g["human_seat"]
     if seat is not None:
         agent = runner.agents[seat]
-        agent.pending_orders = [
-            Order(player=seat, unit_territory=o["unit_territory"],
-                  order_type=OrderType(o["order_type"]),
-                  target=o.get("target"), supported_from=o.get("supported_from"))
-            for o in turn.orders
-        ]
+        try:
+            agent.pending_orders = [
+                Order(player=seat, unit_territory=o["unit_territory"],
+                      order_type=OrderType(o["order_type"]),
+                      target=o.get("target"), supported_from=o.get("supported_from"))
+                for o in turn.orders
+            ]
+        except (KeyError, ValueError, TypeError) as e:
+            return JSONResponse(status_code=400, content={
+                "error": f"malformed order: {e}",
+                "order_types": [t.value for t in OrderType]})
         # Decisions arrive keyed by message id, which is what the browser has
         # to hand; the agent keys them by the deal so a counter-offer inherits
         # the answer already given to the original.
@@ -380,12 +550,15 @@ async def step_game(game_id: str, turn: HumanTurn = HumanTurn()):
         g["winner"] = champion.value
     elif runner.state.turn > runner.max_turns:
         g["finished"] = True
-        counts = runner.center_counts()
-        g["winner"] = max(counts, key=lambda p: counts[p]).value
+        ahead = runner.leaders()
+        # None when the lead is shared: the page renders that as "finished"
+        # rather than crowning whoever sorts first.
+        g["winner"] = ahead[0].value if len(ahead) == 1 else None
+        g["leaders"] = [p.value for p in ahead]
 
     return {
         "turn": played_turn,
-        "step": _serialise_history_step(step_data),
+        "step": _serialise_history_step(step_data, seat),
         **_game_summary(g),
     }
 
@@ -398,13 +571,14 @@ async def get_replay(game_id: str):
     runner = g["runner"]
     return {
         "turns": len(runner.history),
-        "history": [_serialise_history_step(s) for s in runner.history],
+        "history": [_serialise_history_step(s, g["human_seat"])
+                    for s in runner.history],
         **_game_summary(g),
     }
 
 
 @app.get("/api/game/{game_id}/inspect/{player}")
-async def inspect(game_id: str, player: str, turn: Optional[int] = None):
+def inspect(game_id: str, player: str, turn: Optional[int] = None):
     """Everything behind one seat's current decision, step by step.
 
     This is the dashboard's detailed mode: not a summary of what the agent
@@ -422,7 +596,15 @@ async def inspect(game_id: str, player: str, turn: Optional[int] = None):
         seat = Player(player)
     except ValueError:
         return JSONResponse(status_code=400, content={"error": f"no such seat {player!r}"})
+    if seat not in g["runner"].agents:
+        return JSONResponse(status_code=404,
+                            content={"error": f"{player} is not seated in this game"})
 
+    with _playing(g), read_only():
+        return _inspect(g, seat, turn)
+
+
+def _inspect(g, seat: Player, turn: Optional[int]):
     runner = g["runner"]
     agent = runner.agents[seat]
     state = runner.state
@@ -488,7 +670,7 @@ async def inspect(game_id: str, player: str, turn: Optional[int] = None):
     all_sets = generate_all_order_sets(state, seat)
     kept_sets, pruned = planner.prune(state, all_sets, runner.commitments)
     worlds = ns._worlds(state, next(iter(
-        [p for p in Player if p != seat])), None)[1]
+        [p for p in players() if p != seat])), None)[1]
 
     candidates = []
     for cand in kept_sets[:12]:
@@ -517,7 +699,7 @@ async def inspect(game_id: str, player: str, turn: Optional[int] = None):
 
     # ── the belief table, both layers ────────────────────────────────────
     beliefs = []
-    for subject in Player:
+    for subject in players():
         if subject == seat:
             continue
         for c_type in CommitmentType:
@@ -534,9 +716,18 @@ async def inspect(game_id: str, player: str, turn: Optional[int] = None):
                 "pair_weight": round(agent.trust_model._pair_weight(pair), 4),
             })
 
+    last = runner.history[-1].traces.get(seat) if runner.history else None
     return {
         "seat": seat.value,
         "persona": getattr(agent, "persona_name", "?"),
+        # Signed value the last decision walked away from. Empty until a
+        # break happens (or until the planner starts filling it in).
+        "forfeits": [
+            {"commitment": r[0], "partner": r[1].value,
+             "signed_price": round(r[2], 3), "fraction_remaining": round(r[3], 3),
+             "amount": round(r[4], 3)}
+            for r in getattr(last, "forfeit_rows", [])
+        ],
         "turn": state.turn,
         "position_value": round(evaluate_state(state, seat), 4),
         "stance": {p.value: round(v, 4) for p, v in agent.stance().items()},
@@ -564,7 +755,7 @@ async def save(game_id: str):
     if g is None:
         return JSONResponse(status_code=404, content={"error": "Game not found"})
     runner = g["runner"]
-    path = save_replay(runner.history, runner.state)
+    path = save_replay(runner.history, runner.state, board=g["board"].to_dict())
     return {"path": path}
 
 

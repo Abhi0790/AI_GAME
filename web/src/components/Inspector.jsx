@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { inspect } from "../api.js";
-import { COLOR, fmt, pct } from "../constants.js";
+import { COLOR, fmt, pct, orderText } from "../constants.js";
 
 /** Detailed mode: the arithmetic behind one seat's next decision.
  *
@@ -43,6 +43,7 @@ export default function Inspector({ gameId, seat, turn, onClose }) {
             <Deals data={data} open={openDeal} setOpen={setOpenDeal} />
             <Search data={data} />
             <Candidates data={data} />
+            <Forfeits data={data} />
           </>
         )}
       </div>
@@ -99,15 +100,22 @@ function Beliefs({ data }) {
         reliability = <b>w</b>·pair + (1−<b>w</b>)·general,{"  "}
         w = evidence / (evidence + 2)
       </div>
+      <div className="belief-scroll">
       <table>
         <thead>
           <tr><th>of</th><th>type</th><th>general</th><th>to me</th><th>w</th></tr>
         </thead>
         <tbody>
           {rows.filter((r) => r.pair_weight > 0 || r.reliability_general !== 0.5)
-               .map((r, i) => (
-            <tr key={i}>
-              <td><span className="dot" style={{ background: COLOR[r.subject] }} /> {r.subject}</td>
+               // Grouped by subject: at eight seats an interleaved list makes
+               // "how do I rate Gold" impossible to read off.
+               .sort((a, b) => a.subject.localeCompare(b.subject)
+                            || a.commitment_type.localeCompare(b.commitment_type))
+               .map((r, i, all) => (
+            <tr key={i} className={i && all[i - 1].subject !== r.subject ? "grp" : undefined}>
+              <td>{!i || all[i - 1].subject !== r.subject ? (
+                <><span className="dot" style={{ background: COLOR[r.subject] }} /> {r.subject}</>
+              ) : null}</td>
               <td style={{ color: "var(--muted)" }}>{r.commitment_type}</td>
               <td className="num" title={`Beta(${r.alpha}, ${r.beta})`}>
                 {fmt(r.reliability_general)}
@@ -126,6 +134,7 @@ function Beliefs({ data }) {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -273,13 +282,7 @@ function Candidates({ data }) {
               <span className="num">net {fmt(net)}</span>
             </h4>
             <p className="mono">
-              {r.orders
-                .map((o) =>
-                  o.type === "Hold" ? `${o.unit} H`
-                    : o.type === "Move" ? `${o.unit}→${o.target}`
-                    : `${o.unit} S ${o.supported_from ? o.supported_from + "→" : ""}${o.target}`
-                )
-                .join(", ")}
+              {r.orders.map(orderText).join(", ")}
             </p>
             <div className="formula">
               {fmt(r.value)}
@@ -295,6 +298,34 @@ function Candidates({ data }) {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+/* ── 6. what the last break walked away from ──────────────────────── */
+
+function Forfeits({ data }) {
+  const rows = data.forfeits ?? [];
+  if (!rows.length) return null;
+  return (
+    <div className="step">
+      <h5>6 · Forfeits signed value — priced at what the deal cost to sign</h5>
+      <table>
+        <thead>
+          <tr><th>deal</th><th>partner</th><th>signed at</th><th>left</th><th>cost</th></tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={i}>
+              <td>{r.commitment}</td>
+              <td><span className="dot" style={{ background: COLOR[r.partner] }} /> {r.partner}</td>
+              <td className="num">{fmt(r.signed_price, 3)}</td>
+              <td className="num">{fmt(r.fraction_remaining)}</td>
+              <td className="num">{fmt(r.amount, 3)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

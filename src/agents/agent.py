@@ -1,18 +1,15 @@
 from typing import List, Dict, Tuple, Optional
-import uuid
 
 from src.common.schemas import (
-    Player, GameState, Order, OrderType, Commitment, Message, MessageType,
-    CommitmentType, TrustTrace, BeliefSnapshot, CommitmentOutcome,
+    Player, GameState, Order, OrderType, Commitment, CommitmentType, Message,
+    MessageType, TrustTrace, BeliefSnapshot,
 )
+from src.engine.board import players, get_adjacent
 from src.agents.trust.model import TrustModel
-from src.agents.trust.rules import (
-    RuleEngine, OutcomeRule, PublicRecordRule, GossipRule, FalseAccusationRule,
-    FALSE_ACCUSATION_WEIGHT, GOSSIP_TRUST_THRESHOLD,
-)
+from src.agents.trust.rules import RuleEngine, OutcomeRule, PublicRecordRule
 from src.agents.planner.planner import (
     Planner, PlannerConfig, DecisionTrace, evaluate_state, cooperation_value,
-    defection_incentive, CENTRE_VALUE,
+    defection_incentive, near_win, CENTRE_VALUE,
 )
 from src.agents.negotiation.strategy import NegotiationStrategy
 from src.agents.negotiation.personas import PERSONAS, PersonaConfig
@@ -23,6 +20,13 @@ from src.agents.opponent_model.opponent_model import OpponentModel
 GRUDGE_DECAY = 0.75
 THREAT_DECAY = 0.5
 THREAT_WEIGHT = 0.4
+# The "trust" policy believes a partner whose P(keep) toward it is at least this;
+# the same even-odds line fit_cpt holds a three-time betrayer below.
+TRUST_LINE = 0.5
+# A betrayal anyone could see, decayed like a grudge. Every policy but "none"
+# signs nothing with a player whose record is at or above INFAMY_LINE: one
+# break this turn, or a habit of them.
+INFAMY_LINE = 1.0
 
 
 class Agent:
@@ -34,7 +38,7 @@ class Agent:
 
         self.trust_model = TrustModel(player, self.persona.prior_alpha, self.persona.prior_beta)
         self.rule_engine = RuleEngine([
-            OutcomeRule(), PublicRecordRule(), GossipRule(), FalseAccusationRule(),
+            OutcomeRule(), PublicRecordRule(),
         ])
 
         if planner_config is None:
@@ -44,6 +48,10 @@ class Agent:
         self.planner = Planner(player, planner_config)
         self.negotiation = NegotiationStrategy(player, self.planner)
         self.negotiation.privacy_preference = self.persona.privacy
+        self.negotiation.bound = self.persona.policy != "none"
+        # The planner charges back the unused share of whatever the negotiator
+        # signed each deal for, so it needs the prices the negotiator recorded.
+        self.planner.negotiation = self.negotiation
 
         # Opponent model — tracks historical patterns
         self.opponent_model = OpponentModel(player)
@@ -55,13 +63,21 @@ class Agent:
         self.grudges: Dict[Player, float] = {}
         # Who has promised to retaliate against me, and how recently.
         self.deterrence: Dict[Player, float] = {}
+        # Who has been seen breaking a promise to anyone, and how recently.
+        self.infamy: Dict[Player, float] = {}
+        # Who hits back once betrayed: player -> [times betrayed, times they
+        # moved on the betrayer the next turn]. Read as Planner.retaliation.
+        self.retaliations: Dict[Player, List[int]] = {}
+        self._wronged: List[Tuple[Player, Player]] = []    # (victim, betrayer) last turn
+        self._wronged_next: List[Tuple[Player, Player]] = []
+        self._orders_state: Optional[GameState] = None
 
     # ── social position the planner acts on ─────────────────────────────
     def stance(self) -> Dict[Player, float]:
         """One number per player: positive means I will pay to hurt them,
         negative means hurting them has been priced up by their threat."""
         out: Dict[Player, float] = {}
-        for p in Player:
+        for p in players():
             if p == self.player:
                 continue
             w = self.persona.vengeance * self.grudges.get(p, 0.0)
@@ -70,8 +86,47 @@ class Agent:
                 out[p] = w
         return out
 
+    def wronged_by(self, p: Player) -> bool:
+        return self.grudges.get(p, 0.0) >= self.persona.forgive_below
+
+    def policy(self, state: GameState) -> Tuple[set, Dict[Player, float], set]:
+        """The persona's loyalty policy on this board: (partners owed loyalty,
+        charged planner.LOYALTY_COST to break with first; reputation-cost scale
+        per partner; partners I sign nothing with).
+        Nobody is bound to a player about to win."""
+        others = [p for p in players() if p != self.player
+                  and any(u.player == p for u in state.units)]
+        free = {p for p in others if near_win(state, p)}
+        infamous = {p for p in others if self.infamy.get(p, 0.0) >= INFAMY_LINE}
+        kind = self.persona.policy
+        if kind in ("unconditional", "reciprocal"):
+            wronged = {p for p in others if self.wronged_by(p)}
+            loyal = set(others) - wronged - free
+            if kind == "unconditional":
+                return loyal, {}, wronged | infamous
+            return loyal, {p: 0.0 for p in wronged}, wronged | infamous
+        if kind == "trust":
+            doubted = {p for p in others if self.trust_model.p_keeps(
+                p, CommitmentType.ALLIANCE, 0.0, toward=self.player) < TRUST_LINE}
+            return (set(others) - doubted - free, {p: 0.0 for p in doubted},
+                    doubted | infamous)
+        # "none": the cost of a break scales with how much of mine they can reach.
+        mine = [t for t, o in state.supply_centers.items() if o == self.player]
+        weights = {}
+        for p in others:
+            reach = {a for u in state.units if u.player == p for a in get_adjacent(u.territory)}
+            weights[p] = 2.0 * sum(1 for t in mine if t in reach) / max(1, len(mine))
+        return set(), weights, set()
+
+    def retaliation_rate(self, p: Player) -> float:
+        """P(p hits back the turn after being betrayed), Laplace-smoothed toward
+        the planner's prior of one in three."""
+        seen, hit = self.retaliations.get(p, (0, 0))
+        return (hit + 1) / (seen + 3)
+
     def decay_stance(self):
         self.grudges = {p: v * GRUDGE_DECAY for p, v in self.grudges.items() if v * GRUDGE_DECAY > 0.05}
+        self.infamy = {p: v * GRUDGE_DECAY for p, v in self.infamy.items() if v * GRUDGE_DECAY > 0.05}
         self.deterrence = {p: v * THREAT_DECAY for p, v in self.deterrence.items() if v * THREAT_DECAY > 0.05}
 
     # ── incentives ──────────────────────────────────────────────────────
@@ -121,14 +176,16 @@ class Agent:
                         watching two other players deal says nothing about how
                         either treats me.
           private, not
-          in the deal   invisible. Somebody has to tell me, and they can lie —
-                        which is what the gossip rules are for.
+          in the deal   invisible: a deal I am not in and cannot see.
 
         The middle tier is what makes the pair records mean anything. Without
         it an agent's general view of a player was built from exactly the same
         evidence as its pair view, so the two could never disagree.
         """
         for o in outcomes:
+            for breaker in o.broken_by:
+                if breaker != self.player:
+                    self.infamy[breaker] = self.infamy.get(breaker, 0.0) + 1.0
             if self.player in o.commitment.players:
                 incentive = max(
                     (self.estimate_incentive(prev_state, new_state, p) for p in o.broken_by),
@@ -138,35 +195,45 @@ class Agent:
                 # *and* records which rule fired. Calling update_from_outcome
                 # here too would count every outcome twice.
                 self.trust_traces.extend(self.rule_engine.process(
-                    self.trust_model, {'outcome': o, 'incentive_to_defect': incentive}
+                    self.trust_model, {'outcome': o, 'turn': prev_state.turn,
+                                       'incentive_to_defect': incentive}
                 ))
                 for breaker in o.broken_by:
                     if breaker != self.player:
                         self.grudges[breaker] = self.grudges.get(breaker, 0.0) + 1.0
             elif not o.commitment.private:
                 self.trust_traces.extend(self.rule_engine.process(
-                    self.trust_model, {'public_outcome': o}))
+                    self.trust_model,
+                    {'public_outcome': o, 'turn': prev_state.turn}))
 
         self.opponent_model.observe_commitment_outcomes(
             [o for o in outcomes if self.player in o.commitment.players])
+        # The orders observed next are the ones given in prev_state; the
+        # betrayals seen here are answered, or not, in the turn after.
+        self._orders_state = prev_state
+        self._wronged_next = sorted(
+            {(v, b) for o in outcomes for b in o.broken_by
+             for v in o.commitment.players if v != b},
+            key=lambda vb: (vb[0].value, vb[1].value))
+
+    def deal_signed(self, commitment: Commitment, turn: int):
+        """Called by the runner when a deal this seat is in is signed or renewed."""
+        self.negotiation.signed(commitment, turn)
 
     def observe_orders(self, orders: List[Order]):
         """Called by runner after each turn so opponent model can learn.
         Orders are public; who promised what is not."""
         self.opponent_model.observe_orders(orders)
-
-    def receive_gossip(self, msg: Message):
-        if msg.message_type != MessageType.BROADCAST or msg.broadcast_kind != "BETRAYED":
-            return
-        facts = {'gossip': {
-            'sender': msg.sender,
-            'accused': msg.broadcast_target,
-            'commitment_type': msg.commitment_type or CommitmentType.ALLIANCE,
-            'verdict': msg.engine_verdict,
-        }}
-        self.trust_traces.extend(self.rule_engine.process(self.trust_model, facts))
-        if msg.engine_verdict == "CONFIRMED" and msg.broadcast_target != self.player:
-            self.grudges.setdefault(msg.broadcast_target, 0.0)
+        state = self._orders_state
+        for victim, betrayer in self._wronged if state is not None else []:
+            theirs = ({u.territory for u in state.units if u.player == betrayer}
+                      | {t for t, o in state.supply_centers.items() if o == betrayer})
+            hit = any(o.player == victim and o.order_type == OrderType.MOVE
+                      and o.target in theirs for o in orders)
+            rec = self.retaliations.setdefault(victim, [0, 0])
+            rec[0] += 1
+            rec[1] += hit
+        self._wronged = self._wronged_next
 
     def receive_threat(self, msg: Message):
         """A threat is not accepted or rejected, it is believed or not.
@@ -178,124 +245,17 @@ class Agent:
         credibility = self.opponent_model.retaliation_rate(msg.sender)
         self.deterrence[msg.sender] = self.deterrence.get(msg.sender, 0.0) + credibility
 
-    # ── accusations: the agent's decision, not the engine's ─────────────
-    def consider_broadcast(self, state: GameState, outcomes: List[CommitmentOutcome]
-                           ) -> List[Message]:
-        """Decide what, if anything, to tell the table.
-
-        Two separate judgements:
-          truthful — I was betrayed. Saying so costs nothing and moves other
-            players' beliefs, but only if they rate me above the gossip
-            threshold and the betrayer is still someone who matters.
-          false — nobody betrayed me, but the leader is the problem and a
-            story about them would slow everyone else down.
-
-        The second one is now a real calculation rather than a character
-        flaw. The engine can only settle a claim about a deal it was told
-        about publicly, so a lie is refutable exactly when a public deal of
-        that kind exists between me and the target. Picking a pairing with no
-        public deal makes the accusation unfalsifiable, and then all that
-        stands against it is my own reputation. `deception` sets how much of
-        the residual risk the persona is willing to discount.
-        """
-        msgs: List[Message] = []
-        my_standing = self.trust_model.general_trust(self.player)
-
-        def accuse(target: Player, c_type: CommitmentType, truthful: bool) -> Message:
-            return Message(
-                id=str(uuid.uuid4()), sender=self.player, receiver=None,
-                message_type=MessageType.BROADCAST, broadcast_kind="BETRAYED",
-                broadcast_target=target, commitment_type=c_type, truthful=truthful)
-
-        # What the engine would find if it looked up each (player, type) I am
-        # involved in. A public break is provable; a public deal that was kept
-        # refutes anyone naming that type. Keeping a public promise while
-        # breaking a private one of the same kind is therefore a refutation
-        # shield, and there is no point walking into it.
-        broke_publicly: Dict[Tuple[Player, CommitmentType], bool] = {}
-        kept_publicly: Dict[Tuple[Player, CommitmentType], bool] = {}
-        broke_privately: Dict[Tuple[Player, CommitmentType], bool] = {}
-        for o in outcomes:
-            if self.player not in o.commitment.players:
-                continue
-            c_type = o.commitment.commitment_type
-            for q in o.commitment.players:
-                if q == self.player:
-                    continue
-                key = (q, c_type)
-                if q in o.broken_by:
-                    (broke_privately if o.commitment.private else broke_publicly)[key] = True
-                elif not o.commitment.private:
-                    kept_publicly[key] = True
-
-        accused = set()
-        for o in outcomes:
-            if o.kept or self.player not in o.commitment.players or self.player in o.broken_by:
-                continue
-            for betrayer in o.broken_by:
-                if betrayer in accused:
-                    continue
-                # Worth saying only if I will be believed and they still
-                # matter — shouting about a player with nothing left is noise.
-                believable = my_standing > GOSSIP_TRUST_THRESHOLD
-                still_matters = any(u.player == betrayer for u in state.units)
-                if not (believable and still_matters):
-                    continue
-
-                key = (betrayer, o.commitment.commitment_type)
-                provable = broke_publicly.get(key, False)
-                deniable = broke_privately.get(key, False) and not kept_publicly.get(key, False)
-                if not (provable or deniable):
-                    continue  # true, but the engine would refute me
-                accused.add(betrayer)
-                msgs.append(accuse(betrayer, o.commitment.commitment_type, True))
-
-        if msgs or self.persona.deception <= 0:
-            return msgs
-
-        counts = {p: 0 for p in Player}
-        for owner in state.supply_centers.values():
-            if owner:
-                counts[owner] += 1
-        leader = max(counts, key=lambda p: counts[p])
-        if leader == self.player or counts[leader] <= counts[self.player]:
-            return msgs
-        if my_standing <= GOSSIP_TRUST_THRESHOLD:
-            return msgs
-
-        # Which kinds of promise between me and the leader the engine could
-        # look up. A claim about any of those can be refuted; anything else
-        # cannot, and that is what a liar picks.
-        refutable = {
-            o.commitment.commitment_type for o in outcomes
-            if not o.commitment.private
-            and self.player in o.commitment.players
-            and leader in o.commitment.players
-        }
-        deniable = [t for t in CommitmentType if t not in refutable]
-        if not deniable:
-            return msgs
-
-        gain = counts[leader] - counts[self.player]
-        # An unfalsifiable lie still costs something if nobody believes it,
-        # but it cannot trigger R4. The risk that remains is the reputation
-        # already staked on being believed.
-        perceived_risk = FALSE_ACCUSATION_WEIGHT * (1.0 - self.persona.deception)
-        if not refutable:
-            perceived_risk *= 0.25
-        if gain > perceived_risk:
-            msgs.append(accuse(leader, deniable[0], False))
-        return msgs
-
     # ── negotiation ─────────────────────────────────────────────────────
     def propose(self, state: GameState,
                 commitments: Optional[List[Commitment]] = None) -> List[Message]:
         self.negotiation._live_commitments = commitments or []
+        self.negotiation.refuse = self.policy(state)[2]
         return self.negotiation.generate_proposals(state, self.trust_model)
 
     def reply(self, state: GameState, incoming: List[Message],
               commitments: Optional[List[Commitment]] = None) -> List[Message]:
         self.negotiation._live_commitments = commitments or []
+        self.negotiation.refuse = self.policy(state)[2]
         replies = []
         for msg in incoming:
             if msg.message_type == MessageType.THREAT:
@@ -310,6 +270,11 @@ class Agent:
 
     def act(self, state: GameState, active_commitments: List[Commitment]
             ) -> Tuple[List[Order], DecisionTrace]:
+        loyal, weights, _refuse = self.policy(state)
+        self.planner.loyal_to = loyal
+        self.planner.partner_weight = weights
+        self.planner.retaliation = {p: self.retaliation_rate(p) for p in players()
+                                    if p != self.player}
         return self.planner.find_best_orders(
             state, active_commitments, self.trust_model, self.stance())
 
@@ -323,7 +288,7 @@ class HumanAgent(Agent):
     It is a full Agent — same trust model, same opponent model, same beliefs
     panel — with the two decisions a human makes swapped in: which orders to
     give, and which proposals to take. Everything else (learning from
-    outcomes, being gossiped about) happens exactly as it does for the AI, so
+    outcomes) happens exactly as it does for the AI, so
     the trust view and the decision trace stay meaningful with a person in
     the game.
     """
@@ -383,6 +348,3 @@ class HumanAgent(Agent):
         return orders, DecisionTrace(
             orders, evaluate_state(state, self.player), 0.0,
             "Human seat: orders entered by the examiner.")
-
-    def consider_broadcast(self, state, outcomes):
-        return []  # the human accuses through the UI, not on a heuristic

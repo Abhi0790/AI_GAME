@@ -3,10 +3,19 @@ from typing import List, Dict, Optional, Tuple, Any, Set, NamedTuple
 from pydantic import BaseModel, Field
 
 class Player(str, Enum):
+    """The roster of colours a seat can take, not the seats in play.
+
+    Which are seated is a property of the board: iterate
+    `src.engine.board.players()`, not this enum.
+    """
     RED = "Red"
     BLUE = "Blue"
     GREEN = "Green"
     GOLD = "Gold"
+    PURPLE = "Purple"
+    ORANGE = "Orange"
+    TEAL = "Teal"
+    PINK = "Pink"
 
 class UnitType(str, Enum):
     ARMY = "Army"
@@ -60,6 +69,12 @@ class CommitmentType(str, Enum):
     EXCHANGE = "Exchange"
 
 class Commitment(BaseModel):
+    """A promise the engine will grade.
+
+    `valid_until_turn` is the LAST turn on which the deal is graded,
+    inclusive. A deal for k turns struck on turn t has
+    `valid_until_turn = t + k - 1`, and is therefore graded exactly k times.
+    """
     id: str
     commitment_type: CommitmentType
     players: List[Player] # Players involved
@@ -71,9 +86,8 @@ class Commitment(BaseModel):
     dmz_territories: Optional[List[str]] = None # For DMZ / the Exchange's repay leg
 
     # A private deal is graded by the engine exactly like any other, but the
-    # engine does not *publish* the verdict. Nobody outside it can tell a
-    # truthful accusation about one from an invented accusation, which is what
-    # gives lying an expected value instead of being always refutable.
+    # engine does not *publish* the verdict, so nobody outside it can see the
+    # outcome.
     private: bool = False
 
     # Which turn the Exchange's repayment leg falls due. Before it, only the
@@ -86,12 +100,11 @@ class MessageType(str, Enum):
     REJECT = "Reject"
     COUNTER = "Counter"
     THREAT = "Threat"
-    BROADCAST = "Broadcast"
 
 class Message(BaseModel):
     id: str
     sender: Player
-    receiver: Optional[Player] = None # None for broadcast
+    receiver: Optional[Player] = None
     message_type: MessageType
     
     # Payload
@@ -104,8 +117,6 @@ class Message(BaseModel):
     reference_id: Optional[str] = None # For Accept, Reject, Counter
     condition: Optional[str] = None # For Threat
     action: Optional[str] = None # For Threat
-    broadcast_kind: Optional[str] = None # e.g. "BETRAYED"
-    broadcast_target: Optional[Player] = None
 
     # Every member a multi-party pact is meant to bind, sender included. The
     # deal only comes into force once all of them have accepted, so a pact is
@@ -115,11 +126,15 @@ class Message(BaseModel):
     private: bool = False
     repay_turn: Optional[int] = None
 
-    # An accusation is a claim, not a fact. The engine grades it against what
-    # it actually adjudicated and stamps a verdict before anyone acts on it,
-    # so a liar can be caught and a truthful accuser can be believed.
-    engine_verdict: Optional[str] = None # "CONFIRMED" | "REFUTED"
-    truthful: Optional[bool] = None      # ground truth, for evaluation only
+    # Who takes players[0] — the supporter on a SUPPORT, the giver on an
+    # EXCHANGE. Direction was implied by who spoke, so a COUNTER swapped it and
+    # graded the wrong side. None means the sender, which is the usual case.
+    obligated: Optional[Player] = None
+
+    # The arithmetic the sender did before saying this, so the UI can show
+    # the decision rather than only its verdict. Priced at the moment of
+    # speaking; nothing reads it back, so it is free to be incomplete.
+    rationale: Optional[Dict[str, float]] = None
 
 class BeliefSnapshot(BaseModel):
     observer: Player
@@ -148,7 +163,9 @@ class DecisionTrace:
                  explanation: str, commitment_broken: bool = False,
                  penalty_rows: Optional[List[tuple]] = None, nodes: int = 0,
                  vengeance: float = 0.0, search: str = "expectiminimax",
-                 candidates: int = 0, pruned: int = 0):
+                 candidates: int = 0, pruned: int = 0,
+                 reversals: Optional[List[tuple]] = None,
+                 forfeit_rows: Optional[List[tuple]] = None):
         self.candidate_orders = candidate_orders
         self.expected_value = expected_value
         self.penalty = penalty
@@ -163,6 +180,19 @@ class DecisionTrace:
         self.search = search
         self.candidates = candidates  # order sets after pruning
         self.pruned = pruned          # order sets discarded by dominance
+        # (commitment_key, break advantage) per live deal I am in: how much
+        # better my best treacherous order set scores than my best loyal one,
+        # *after* the reputation penalty. Positive means that at order time I
+        # would rather break this deal than keep it. Paired with what I paid
+        # for the deal at signature, it measures whether my negotiator and my
+        # planner agree about the same promise in the same turn.
+        self.reversals = reversals or []
+        # (commitment_key, partner, signed_price, fraction_remaining, amount)
+        # per broken deal: the share of the price I credited this deal with at
+        # signature that breaking it now forfeits. Signing and breaking are
+        # then priced with the same number, so the two cannot disagree on an
+        # unchanged board. `penalty` includes the sum of these.
+        self.forfeit_rows = forfeit_rows or []
 
 class TrustTrace:
     """Trust model's account of which rule fired and on what inputs."""
@@ -176,6 +206,19 @@ class TrustTrace:
         self.explanation = explanation
 
 
+def leaders(counts: Dict["Player", int]) -> List["Player"]:
+    """Every player tied for the most centres.
+
+    Ties are the normal case, not an edge case: with the default threshold
+    unreachable, 80% of games end shared. Taking `max()` and moving on hands
+    every one of them to whichever seat comes first in `Player`.
+    """
+    if not counts:
+        return []
+    top = max(counts.values())
+    return [p for p, c in counts.items() if c == top]
+
+
 def exchange_leg_due(c: "Commitment", turn: int) -> Optional[str]:
     """Which half of an Exchange is owed this turn: "give", "repay" or neither.
 
@@ -187,6 +230,21 @@ def exchange_leg_due(c: "Commitment", turn: int) -> Optional[str]:
     if c.repay_turn is not None and turn >= c.repay_turn:
         return "repay"
     return "give"
+
+
+def obligated_parties(c: "Commitment", turn: int) -> List["Player"]:
+    """Who actually owes something on this deal, this turn.
+
+    Alliance and DMZ bind every member. A SUPPORT obligates only players[0];
+    an EXCHANGE obligates one side per leg. Crediting the other party with a
+    kept promise inflates trust and deflates every betrayal denominator.
+    """
+    if c.commitment_type == CommitmentType.SUPPORT:
+        return c.players[:1]
+    if c.commitment_type == CommitmentType.EXCHANGE:
+        i = 0 if exchange_leg_due(c, turn) == "give" else 1
+        return c.players[i:i + 1] or c.players[:1]
+    return list(c.players)
 
 
 def commitment_key(c: "Commitment"):
@@ -207,7 +265,7 @@ def commitment_key(c: "Commitment"):
     # renewed: publicity is one-way, because you cannot un-say it.
 
 
-def invalid_proposal_reason(msg: Message, max_turns: int = 12) -> Optional[str]:
+def invalid_proposal_reason(msg: Message, max_turns: Optional[int] = None) -> Optional[str]:
     """Why this message is not a sentence of the grammar, or None if it is.
 
     Every accepted deal goes through here before it becomes a commitment the
@@ -217,11 +275,17 @@ def invalid_proposal_reason(msg: Message, max_turns: int = 12) -> Optional[str]:
     and the planner will dutifully price it.
     """
     from src.engine.board import get_all_territories, is_adjacent
+    from src.engine.board import max_turns as board_max_turns
+
+    if max_turns is None:
+        max_turns = board_max_turns()
 
     if msg.message_type not in (MessageType.PROPOSE, MessageType.COUNTER):
         return "not a proposal"
     if msg.commitment_type is None:
         return "no commitment type"
+    # Durations are inclusive (see Commitment): k turns struck on turn t run
+    # to t+k-1, so max_turns turns from turn 1 ends exactly on the last turn.
     if msg.turns is not None and not (1 <= msg.turns <= max_turns):
         return f"duration {msg.turns} out of range"
 
@@ -271,20 +335,35 @@ def message_to_commitment(msg: Message, accepted_by: Player, current_turn: int) 
         players = list(dict.fromkeys(msg.coalition))
     else:
         players = [msg.sender, accepted_by]
+        # A directional deal names its obligated side, so countering it does
+        # not hand the duty to whoever happened to speak last.
+        if msg.obligated is not None and msg.obligated in players:
+            players = [msg.obligated] + [p for p in players if p != msg.obligated]
 
     turns = msg.turns if msg.turns else 1
+    # This turn counts as the first of the k, so the deal is graded on turns
+    # t .. t+k-1 and the runner's `valid_until_turn >= turn` expiry leaves it
+    # graded exactly k times.
+    valid_until = current_turn + turns - 1
+
+    repay_turn = None
+    if msg.commitment_type == CommitmentType.EXCHANGE:
+        repay_turn = msg.repay_turn if msg.repay_turn is not None else current_turn + 1
+        # Both legs have to be gradable or it is a gift, not a bargain: a
+        # one-turn exchange (which a COUNTER can produce by halving the term)
+        # would otherwise expire before the repayment fell due.
+        valid_until = max(valid_until, repay_turn)
+
     return Commitment(
         id=msg.id,
         commitment_type=msg.commitment_type,
         players=players,
-        valid_until_turn=current_turn + turns,
+        valid_until_turn=valid_until,
         target_territory=msg.target_territory,
         supported_from=msg.supported_from,
         dmz_territories=msg.dmz_territories,
         private=msg.private,
-        repay_turn=(msg.repay_turn if msg.repay_turn is not None
-                    else (current_turn + 1
-                          if msg.commitment_type == CommitmentType.EXCHANGE else None)),
+        repay_turn=repay_turn,
     )
 
 
@@ -317,10 +396,6 @@ def describe_message(m: "Message") -> str:
         return f"{who} {t} {body} for {m.turns or 1}t"
     if m.message_type == MessageType.THREAT:
         return f"{who} THREAT if {m.condition} then {m.action}"
-    if m.message_type == MessageType.BROADCAST:
-        target = m.broadcast_target.value if m.broadcast_target else "?"
-        verdict = f" [{m.engine_verdict}]" if m.engine_verdict else ""
-        return f"{who} BROADCAST {m.broadcast_kind} {target}{verdict}"
     return f"{who} {t}"
 
 
@@ -341,7 +416,37 @@ class TurnRecord(NamedTuple):
     messages: List[Message] = ()
     beliefs: List[BeliefSnapshot] = ()
     commitments: List[Commitment] = ()
-    nodes: Dict[Player, int] = ()
+    nodes: Dict[Player, int] = ()            # adjudications the search budget counted
+    total_nodes: Dict[Player, int] = ()      # every adjudication the seat caused, negotiation included
+
+
+class ReversalPoint(BaseModel):
+    """One deal, priced twice in the same turn by the same agent.
+
+    `signed_gain` is what the negotiator thought the deal was worth when it
+    put its name to it (V_kept - V_none over the deal's life). `break_advantage`
+    is what the planner thought breaking it was worth a moment later, net of
+    the reputation penalty. Both positive is a *preference reversal*: the agent
+    bought something and immediately preferred not to have it.
+
+    The two decisions run on different opponent models, which is the thing this
+    record exists to measure -- negotiation prices a deal assuming cooperation
+    is conditional, planning prices orders against a partner whose behaviour is
+    sampled independently of what was promised.
+    """
+    turn: int
+    player: Player
+    commitment_type: CommitmentType
+    signed_gain: float
+    break_advantage: float
+    # Which game this row came from, as CalibrationPoint.game. Rows from one
+    # game share a board and the same four agents, so an interval that counts
+    # them as independent trials is too narrow.
+    game: Optional[int] = None
+
+    @property
+    def reversed_(self) -> bool:
+        return self.signed_gain > 0 and self.break_advantage > 0
 
 
 class CalibrationPoint(BaseModel):
@@ -357,6 +462,9 @@ class CalibrationPoint(BaseModel):
     commitment_id: str = ""
     predicted: float
     observed: Optional[bool] = None
+    # Which game this row came from. Rows share a seed, a board and the same
+    # players, so anything that splits or bootstraps has to cluster on it.
+    game: Optional[int] = None
     # The two network inputs, kept so the CPT can be refitted on logged data
     # instead of guessed at (issue #16).
     reliability: float = 0.5

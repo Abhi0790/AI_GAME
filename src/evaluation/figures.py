@@ -8,7 +8,7 @@ without replaying anything.
     1. betrayal rate vs turn, per persona
     2. Vcoop at the moment of a break, vs turn
     3. rating by persona x search horizon
-    4. turns to coalition, broadcast rule on vs off
+    4. turns to coalition
     5. reliability diagram (with the Brier score)
     6. win rate vs adjudications per turn, expectiminimax vs MCTS
 """
@@ -17,6 +17,8 @@ from typing import Dict, List, Any, Optional
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+from src.evaluation.metrics import MIN_GAMES
 
 # One colour per persona everywhere, so a reader can carry the legend between
 # figures without re-reading it.
@@ -98,20 +100,17 @@ def rating_by_persona_and_horizon(data: Dict[int, Dict[str, float]]):
     return fig
 
 
-def turns_to_coalition(on: List[Optional[int]], off: List[Optional[int]]):
-    """Figure 4. How long until an alliance forms, broadcasts on vs off."""
+def turns_to_coalition(turns: List[Optional[int]]):
+    """Figure 4. How long until an alliance forms."""
     fig, ax = plt.subplots(figsize=(7, 4))
-    clean = lambda xs: [x for x in xs if x is not None]
-    datasets = [clean(on), clean(off)]
-    labels = [f"broadcast on (n={len(clean(on))})", f"broadcast off (n={len(clean(off))})"]
+    formed = [t for t in turns if t is not None]
 
-    if any(datasets):
-        parts = ax.boxplot(datasets, tick_labels=labels, patch_artist=True, widths=0.5)
-        for patch, colour in zip(parts["boxes"], ["#4c9f70", "#8a8a8a"]):
-            patch.set_facecolor(colour)
-            patch.set_alpha(0.6)
-        for i, values in enumerate(datasets, start=1):
-            ax.scatter([i] * len(values), values, s=18, color="#222", zorder=3, alpha=0.6)
+    if formed:
+        parts = ax.boxplot([formed], tick_labels=[f"n={len(formed)} of {len(turns)}"],
+                           patch_artist=True, widths=0.5)
+        parts["boxes"][0].set_facecolor("#4c9f70")
+        parts["boxes"][0].set_alpha(0.6)
+        ax.scatter([1] * len(formed), formed, s=18, color="#222", zorder=3, alpha=0.6)
     _style(ax, "Turns until the first standing alliance", "", "Turn")
     fig.tight_layout()
     return fig
@@ -148,21 +147,34 @@ def reliability_diagram(bins: List[Dict[str, Any]], brier: Optional[float],
 
 
 def win_rate_vs_budget(rows: List[Dict[str, Any]]):
-    """Figure 6. rows: {search, adjudications, win_rate, games}.
+    """Figure 6. rows: {search, adjudications, win_rate, win_rate_lo/hi, games}.
 
     The comparison the report asks for is at *equal budget*, which is why
-    both searches count adjudications through the same counter.
+    both searches count adjudications through the same counter. Each point
+    carries its 95% interval: at two games per cell the old version of this
+    figure plotted only 0.0 and 1.0 and looked decisive.
     """
     fig, ax = plt.subplots(figsize=(7, 4))
     colours = {"expectiminimax": "#5b7db1", "mcts": "#c1666b"}
     for search in sorted({r["search"] for r in rows}):
         pts = sorted((r for r in rows if r["search"] == search),
                      key=lambda r: r["adjudications"])
-        ax.plot([p["adjudications"] for p in pts], [p["win_rate"] for p in pts],
-                marker="o", markersize=5, linewidth=1.6, label=search,
-                color=colours.get(search))
-    _style(ax, "Win rate against adjudications per turn",
-           "Adjudications per turn (search budget)", "Win rate")
+        # Asymmetric Wilson bars: a cell at 0 wins has no room below it, and
+        # a symmetric bar there drew the eye to an interval that cannot exist.
+        lo = [p["win_rate"] - p.get("win_rate_lo", p["win_rate"]) for p in pts]
+        hi = [p.get("win_rate_hi", p["win_rate"]) - p["win_rate"] for p in pts]
+        ax.errorbar([p["adjudications"] for p in pts], [p["win_rate"] for p in pts],
+                    yerr=[lo, hi],
+                    marker="o", markersize=5, linewidth=1.6, capsize=3,
+                    label=search, color=colours.get(search))
+
+    n = min((r.get("games", 0) for r in rows), default=0)
+    title = f"Win rate against adjudications per turn (n={n} games per cell)"
+    _style(ax, title, "Adjudications per turn (search budget)", "Win rate")
+    if rows and n < MIN_GAMES:
+        ax.text(0.5, 0.97, f"n below threshold (MIN_GAMES={MIN_GAMES})",
+                transform=ax.transAxes, ha="center", va="top", fontsize=9,
+                color="#c1666b")
     ax.set_ylim(-0.05, 1.05)
     if rows:
         ax.legend(fontsize=8, frameon=False)
