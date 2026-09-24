@@ -41,3 +41,9 @@ def test_every_adjudication_is_charged_to_a_seat():
     for step in runner.history:
         for p, n in step.nodes.items():
             assert n <= step.total_nodes[p]
+
+
+def test_seating_varies_who_sits_opposite_whom():
+    opposite = {frozenset((s[Player.RED], s[Player.GREEN]))
+                for s in map(seating_for, range(12))}
+    assert len(opposite) == 6

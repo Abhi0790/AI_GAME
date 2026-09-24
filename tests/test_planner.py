@@ -184,7 +184,7 @@ class TestGameEnd:
     """A player at win_centers ends the game; one short of it is about to."""
 
     BLUE_WINS = {"R1": Player.RED, "R2": Player.RED, "B1": Player.BLUE, "B2": Player.BLUE,
-                 "N1": Player.BLUE, "N2": Player.BLUE, "G1": Player.BLUE}
+                 "N1": Player.BLUE, "N2": Player.BLUE, "G1": Player.BLUE, "G2": Player.BLUE}
 
     def test_a_rival_reaching_the_threshold_costs_the_game_end_value(self):
         from src.agents.planner.planner import GAME_END_VALUE

@@ -142,11 +142,11 @@ bounces and supports can be cut. Odd turns are spring, even turns autumn, when
 centres change hands and units are built or removed. New units go only on the
 player's own empty home centres, as in standard Diplomacy; `--build-anywhere`
 (or unticking the dashboard's "home builds" box) allows any owned centre. A
-game ends when someone holds 5 centres, or after 12 turns.
+game ends when someone holds 6 centres, or after 12 turns.
 
 None of those numbers are fixed. Every script takes `--seats` (2–8), `--homes`
 (home centres, and so units, per player), `--win-centers`, `--win-fraction` (the
-share of the board's centres that wins when `--win-centers` is not given, 0.5 by
+share of the board's centres that wins when `--win-centers` is not given, 0.6 by
 default) and `--max-turns`, and
 the dashboard has the same controls; the map is generated to match and is proved
 symmetric before it is played on. The default is exactly the board above.

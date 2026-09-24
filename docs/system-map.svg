@@ -1,0 +1,769 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1720" height="2500" viewBox="0 0 1720 2500" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title>Territory / Diplomacy-lite — complete system map</title>
+<desc>Every component of the negotiating-agent project: board, engine and adjudicator, shared schemas, the turn loop, one agent's internals (negotiation, planner, trust, opponent model, stance, accusation policy), how a promise is graded and what it changes, and every surface that reads the history.</desc>
+
+<style>
+  text { fill: #2b3138; }
+  .ttl  { font-size: 27px; font-weight: 650; fill: #14181d; letter-spacing: -0.01em; }
+  .sub1 { font-size: 13.5px; fill: #5b6672; }
+  .kicker { font-size: 11px; fill: #8a929c; letter-spacing: 0.14em; }
+  .ph   { font-size: 12.5px; font-weight: 650; fill: #14181d; letter-spacing: 0.08em; }
+  .pf   { font-size: 10px; fill: #8a929c; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .sh   { font-size: 11px; font-weight: 650; fill: #14181d; letter-spacing: 0.04em; }
+  .b    { font-size: 10.5px; fill: #2b3138; }
+  .bm   { font-size: 10.5px; fill: #6b7480; }
+  .bs   { font-size: 9.6px; fill: #6b7480; }
+  .mono { font-size: 9.8px; fill: #2b3138; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .monod{ font-size: 9.8px; fill: #7a838e; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .fm   { font-size: 10px; fill: #1e4a93; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .acc  { fill: #2f6fdb; }
+  .good { fill: #2e7d57; }
+  .bad  { fill: #c2453f; }
+  .warn { fill: #9a6b12; }
+  .bul  { font-size: 10.5px; fill: #b3bbc4; }
+  .nlabel { font-size: 10px; font-weight: 650; fill: #ffffff; text-anchor: middle; }
+  .nlabeld { font-size: 10px; font-weight: 650; fill: #3a424c; text-anchor: middle; }
+  .badge { font-size: 11px; font-weight: 700; fill: #ffffff; text-anchor: middle; }
+  .panel { fill: #f7f8fa; stroke: #dde2e8; }
+  .sub   { fill: #ffffff; stroke: #e4e8ed; }
+  .form  { fill: #eef3fb; stroke: #d2e0f6; }
+  .edge  { stroke: #c9d0d8; stroke-width: 1.4; }
+  .flow  { stroke: #98a1ab; stroke-width: 1.4; fill: none; marker-end: url(#ar); }
+  .flowa { stroke: #2f6fdb; stroke-width: 1.6; fill: none; marker-end: url(#ara); }
+  .rule  { stroke: #e4e8ed; stroke-width: 1; }
+</style>
+
+<defs>
+  <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#98a1ab"/>
+  </marker>
+  <marker id="ara" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+    <path d="M0,0 L10,5 L0,10 z" fill="#2f6fdb"/>
+  </marker>
+</defs>
+
+<rect width="1720" height="2500" fill="#ffffff"/>
+
+<!-- ══════════ HEADER ══════════ -->
+<g transform="translate(40,40)">
+  <text class="kicker" y="0">SYSTEM MAP · EVERY NUMBER ON THIS PAGE IS READ OUT OF THE CODE</text>
+  <text class="ttl" y="30">Territory — negotiating agents that keep, and break, their word</text>
+  <text class="sub1" y="54">2–8 agents · a generated map · a closed negotiation grammar · and an engine that grades every promise it hears</text>
+  <text class="bm" y="74">No learning in the core. Explicit trust, explicit commitments, explicit search — and because &#8220;kept&#8221; and &#8220;broken&#8221; are facts the engine decides, the trust model rests on evidence rather than opinion. Board size, seat count, win threshold and horizon are all settings; the default below is ring_board(4).</text>
+  <line class="rule" x1="0" y1="90" x2="1640" y2="90"/>
+</g>
+
+<!-- ══════════ ROW 1 ══════════ -->
+
+<!-- Panel A: the board -->
+<g transform="translate(40,148)">
+  <rect class="panel" width="520" height="340" rx="8"/>
+  <text class="ph" x="16" y="26">THE BOARD</text>
+  <text class="pf" x="16" y="42">src/engine/board.py</text>
+
+  <g stroke-linecap="round">
+    <line class="edge" x1="85" y1="109" x2="145" y2="80"/>
+    <line class="edge" x1="85" y1="109" x2="56"  y2="169"/>
+    <line class="edge" x1="85" y1="109" x2="109" y2="169"/>
+    <line class="edge" x1="145" y1="80" x2="205" y2="109"/>
+    <line class="edge" x1="145" y1="80" x2="145" y2="133"/>
+    <line class="edge" x1="205" y1="109" x2="234" y2="169"/>
+    <line class="edge" x1="205" y1="109" x2="145" y2="133"/>
+    <line class="edge" x1="234" y1="169" x2="205" y2="229"/>
+    <line class="edge" x1="234" y1="169" x2="181" y2="169"/>
+    <line class="edge" x1="205" y1="229" x2="145" y2="258"/>
+    <line class="edge" x1="205" y1="229" x2="181" y2="169"/>
+    <line class="edge" x1="145" y1="258" x2="85"  y2="229"/>
+    <line class="edge" x1="145" y1="258" x2="145" y2="205"/>
+    <line class="edge" x1="85" y1="229" x2="56"  y2="169"/>
+    <line class="edge" x1="85" y1="229" x2="145" y2="205"/>
+    <line class="edge" x1="56" y1="169" x2="109" y2="169"/>
+    <line class="edge" x1="145" y1="133" x2="109" y2="169"/>
+    <line class="edge" x1="145" y1="133" x2="181" y2="169"/>
+    <line class="edge" x1="145" y1="205" x2="109" y2="169"/>
+    <line class="edge" x1="145" y1="205" x2="181" y2="169"/>
+  </g>
+
+  <g>
+    <circle cx="85"  cy="109" r="15" fill="#d4605a" stroke="#ffffff" stroke-width="2.5"/>
+    <circle cx="145" cy="80"  r="15" fill="#d4605a" stroke="#ffffff" stroke-width="2.5"/>
+    <circle cx="205" cy="109" r="15" fill="#5b8fd6" stroke="#ffffff" stroke-width="2.5"/>
+    <circle cx="234" cy="169" r="15" fill="#5b8fd6" stroke="#ffffff" stroke-width="2.5"/>
+    <circle cx="205" cy="229" r="15" fill="#5aa878" stroke="#ffffff" stroke-width="2.5"/>
+    <circle cx="145" cy="258" r="15" fill="#5aa878" stroke="#ffffff" stroke-width="2.5"/>
+    <circle cx="85"  cy="229" r="15" fill="#c9a24a" stroke="#ffffff" stroke-width="2.5"/>
+    <circle cx="56"  cy="169" r="15" fill="#c9a24a" stroke="#ffffff" stroke-width="2.5"/>
+    <circle cx="145" cy="133" r="15" fill="#9aa4ae" stroke="#ffffff" stroke-width="2.5"/>
+    <circle cx="145" cy="205" r="15" fill="#9aa4ae" stroke="#ffffff" stroke-width="2.5"/>
+    <circle cx="109" cy="169" r="13" fill="#ffffff" stroke="#b6bec7" stroke-width="1.6" stroke-dasharray="3 2.5"/>
+    <circle cx="181" cy="169" r="13" fill="#ffffff" stroke="#b6bec7" stroke-width="1.6" stroke-dasharray="3 2.5"/>
+    <text class="nlabel" x="85"  y="113">R1</text>
+    <text class="nlabel" x="145" y="84">R2</text>
+    <text class="nlabel" x="205" y="113">B1</text>
+    <text class="nlabel" x="234" y="173">B2</text>
+    <text class="nlabel" x="205" y="233">G1</text>
+    <text class="nlabel" x="145" y="262">G2</text>
+    <text class="nlabel" x="85"  y="233">Y1</text>
+    <text class="nlabel" x="56"  y="173">Y2</text>
+    <text class="nlabel" x="145" y="137">N1</text>
+    <text class="nlabel" x="145" y="209">N2</text>
+    <text class="nlabeld" x="109" y="173">C2</text>
+    <text class="nlabeld" x="181" y="173">C1</text>
+  </g>
+
+  <g transform="translate(272,0)">
+    <text class="b"  y="72">default: 12 territories · 10 centres · 2 corridors</text>
+    <text class="b"  y="89">4 seats × 2 units — ring_board(n, homes) scales both</text>
+    <text class="bm" y="110">Red  R1 · R2      Blue  B1 · B2</text>
+    <text class="bm" y="126">Green G1 · G2     Gold  Y1 · Y2</text>
+    <text class="bm" y="142">Neutral N1 · N2 — C1 · C2 hold no centre</text>
+    <text class="b"  y="166">Borders: 2 rivals, 1 neutral, 1 corridor</text>
+    <text class="b"  y="183">— so nobody starts a move ahead</text>
+    <text class="bm" y="204">_check() asserts adjacency, connectivity,</text>
+    <text class="bm" y="220">homes, thresholds — and Board is frozen</text>
+    <text class="b"  y="244">win on win_centers, else most at the horizon</text>
+    <text class="b"  y="261">odd turn spring · even turn autumn</text>
+    <text class="bm" y="277">autumn: centres change hands, then builds —</text>
+    <text class="bs" y="300">build site and disband are drawn at random:</text>
+    <text class="bs" y="314">by list order they cost a seat 0.46 centres.</text>
+  </g>
+
+  <g transform="translate(16,292)">
+    <circle cx="8" cy="18" r="7" fill="#9aa4ae"/>
+    <text class="bs" x="22" y="21">neutral centre</text>
+    <circle cx="112" cy="18" r="7" fill="#ffffff" stroke="#b6bec7" stroke-width="1.4" stroke-dasharray="3 2.5"/>
+    <text class="bs" x="126" y="21">corridor</text>
+  </g>
+</g>
+
+<!-- Panel B: engine -->
+<g transform="translate(580,148)">
+  <rect class="panel" width="540" height="340" rx="8"/>
+  <text class="ph" x="16" y="26">ENGINE &amp; ADJUDICATOR — the only thing that knows what happened</text>
+  <text class="pf" x="16" y="42">src/engine/ · adjudicator.py · orders.py · runner.py · replay.py</text>
+
+  <g transform="translate(16,58)">
+    <rect class="sub" width="508" height="140" rx="6"/>
+    <text class="sh" x="12" y="20">resolve(state, orders, commitments) → (state&#8242;, outcomes, log)</text>
+    <text class="b"  x="12" y="41">strength = 1 + uncut supports; an attack wins only if strictly greater</text>
+    <text class="b"  x="12" y="57">equal strength bounces — no dice anywhere in the system</text>
+    <text class="b"  x="12" y="73">support is cut by an attack from anywhere but the square it supports into</text>
+    <text class="b"  x="12" y="89">self-dislodgement is impossible; dislodged units are removed, not retreated</text>
+    <text class="b"  x="12" y="105">territory_owners = occupancy, rebuilt each turn; supply_centers persist</text>
+    <text class="b"  x="12" y="121">autumn (turn % 2 == 0): centres change hands, then build / remove at random</text>
+  </g>
+
+  <g transform="translate(16,208)">
+    <rect class="sub" width="508" height="66" rx="6"/>
+    <text class="sh" x="12" y="20">verify_commitments(state, commitments, orders) → CommitmentOutcome[]</text>
+    <text class="b"  x="12" y="40">Grades the <tspan font-weight="650">intended</tspan> orders, before resolution: you break a promise by</text>
+    <text class="b"  x="12" y="56">ordering the move, not by succeeding at it. This is the whole trust model&#8217;s floor.</text>
+  </g>
+
+  <text class="bm" x="16" y="296">orders.py — generate_all_order_sets(), ≤ 300 sets, cache keyed on placement <tspan font-weight="650">and board</tspan></text>
+  <text class="bm" x="16" y="312">replay.py — save_replay() / load_replay() / reconstruct_states() → replays/*.json</text>
+  <text class="bm" x="16" y="328">runner.py — GameRunner owns the <tspan font-weight="650">only</tspan> turn loop; the CLI and the dashboard both call step()</text>
+</g>
+
+<!-- Panel C: schemas -->
+<g transform="translate(1140,148)">
+  <rect class="panel" width="540" height="340" rx="8"/>
+  <text class="ph" x="16" y="26">SHARED VOCABULARY — the integrator</text>
+  <text class="pf" x="16" y="42">src/common/schemas.py — imports nothing from the project</text>
+
+  <g transform="translate(16,58)">
+    <rect class="sub" width="508" height="224" rx="6"/>
+    <g transform="translate(12,20)">
+      <text class="mono"  y="0">Player        8 colours; the board</text>
+      <text class="monod" y="14">              says which are seated</text>
+      <text class="mono"  y="30">Unit          player, territory</text>
+      <text class="mono"  y="32">Order         unit_territory, type,</text>
+      <text class="monod" y="46">              target, supported_from</text>
+      <text class="mono"  y="62">OrderType     Hold Move Support</text>
+      <text class="mono"  y="78">GameState     turn, units,</text>
+      <text class="monod" y="92">              supply_centers, owners</text>
+      <text class="mono"  y="108">Commitment    players, valid_until,</text>
+      <text class="monod" y="122">              dmz[], target, private,</text>
+      <text class="monod" y="136">              repay_turn</text>
+      <text class="mono"  y="152">CommitmentType  Alliance · Support</text>
+      <text class="monod" y="166">                DMZ · Exchange</text>
+      <text class="mono"  y="182">MessageType   Propose Accept Reject</text>
+      <text class="monod" y="196">              Counter Threat Broadcast</text>
+    </g>
+    <line class="rule" x1="252" y1="10" x2="252" y2="206"/>
+    <g transform="translate(262,20)">
+      <text class="mono"  y="0">Message      grammar payload +</text>
+      <text class="monod" y="14">             coalition, private,</text>
+      <text class="monod" y="28">             engine_verdict, truthful,</text>
+      <text class="mono"  y="44" fill="#1e4a93">             rationale  ← verbose mode</text>
+      <text class="mono"  y="62">CommitmentOutcome  kept, broken_by</text>
+      <text class="mono"  y="78">DecisionTrace  EV, penalty, rows,</text>
+      <text class="monod" y="92">             nodes, candidates, pruned</text>
+      <text class="mono"  y="108">TrustTrace   rule, inputs, effect</text>
+      <text class="mono"  y="124">BeliefSnapshot  Beta(α,β) + pair</text>
+      <text class="mono"  y="140">CalibrationPoint  predicted vs kept</text>
+      <text class="mono"  y="156">ReversalPoint  signed vs break gain</text>
+      <text class="mono"  y="172">TurnRecord   one whole turn, once</text>
+    </g>
+  </g>
+
+  <g transform="translate(16,276)">
+    <rect class="form" width="508" height="54" rx="6"/>
+    <text class="bs" x="12" y="16">THE IMPORT RULE — the graph is acyclic, and importing the runner is the check</text>
+    <text class="fm" x="12" y="32" font-size="9.2">common ← engine ← {planner, opponent_model} ← negotiation ← agent ← {ui, evaluation}</text>
+    <text class="bs" x="12" y="47">helpers: commitment_key() · message_to_commitment() · invalid_proposal_reason() · describe_message() · leaders()</text>
+  </g>
+</g>
+
+<!-- ══════════ ROW 2 · THE TURN LOOP ══════════ -->
+<g transform="translate(40,516)">
+  <rect class="panel" width="1640" height="330" rx="8"/>
+  <text class="ph" x="16" y="26">ONE TURN — GameRunner.step()</text>
+  <text class="pf" x="270" y="26">src/engine/runner.py · the CLI, the dashboard and the tournament runner all enter here, so they cannot drift apart</text>
+
+  <g transform="translate(20,44)">
+    <!-- stage 1 -->
+    <g transform="translate(0,0)">
+      <rect class="sub" width="218" height="198" rx="6"/>
+      <circle cx="20" cy="22" r="11" fill="#2f6fdb"/><text class="badge" x="20" y="26">1</text>
+      <text class="sh" x="38" y="26">Expire &amp; cool</text>
+      <text class="b"  x="12" y="52">deals past valid_until drop</text>
+      <text class="b"  x="12" y="68">off the table (inclusive)</text>
+      <text class="b"  x="12" y="88">grudges decay × 0.75</text>
+      <text class="b"  x="12" y="104">deterrence decays × 0.5</text>
+      <text class="bm" x="12" y="124">nobody nurses a grudge for</text>
+      <text class="bm" x="12" y="140">the whole game</text>
+      <line class="rule" x1="12" y1="156" x2="206" y2="156"/>
+      <text class="bs" x="12" y="172">out ▸ the live promise set</text>
+      <text class="bs" x="12" y="186">for this turn</text>
+    </g>
+    <!-- stage 2 -->
+    <g transform="translate(230,0)">
+      <rect class="sub" width="218" height="198" rx="6"/>
+      <circle cx="20" cy="22" r="11" fill="#2f6fdb"/><text class="badge" x="20" y="26">2</text>
+      <text class="sh" x="38" y="26">Negotiate</text>
+      <text class="b"  x="12" y="52">begin_turn() → proposals</text>
+      <text class="b"  x="12" y="68">3 rounds by default:</text>
+      <text class="b"  x="12" y="84">reply → counter → reply</text>
+      <text class="b"  x="12" y="104">grammar gate rejects any</text>
+      <text class="b"  x="12" y="120">malformed offer</text>
+      <text class="b"  x="12" y="140">a pact binds only once</text>
+      <text class="b"  x="12" y="156">every member has signed</text>
+      <line class="rule" x1="12" y1="166" x2="206" y2="166"/>
+      <text class="bs" x="12" y="182">out ▸ Message[] and the</text>
+      <text class="bs" x="12" y="194">Commitment[] they formed</text>
+    </g>
+    <!-- stage 3 -->
+    <g transform="translate(460,0)">
+      <rect class="sub" width="218" height="198" rx="6"/>
+      <circle cx="20" cy="22" r="11" fill="#2f6fdb"/><text class="badge" x="20" y="26">3</text>
+      <text class="sh" x="38" y="26">Predict</text>
+      <text class="b"  x="12" y="52">every live deal, priced by</text>
+      <text class="b"  x="12" y="68">every player in it, before</text>
+      <text class="b"  x="12" y="84">anybody moves</text>
+      <text class="b"  x="12" y="104">P(keep) with the two inputs</text>
+      <text class="b"  x="12" y="120">that produced it logged</text>
+      <text class="bm" x="12" y="140">a prediction nobody writes</text>
+      <text class="bm" x="12" y="156">down cannot be graded</text>
+      <line class="rule" x1="12" y1="166" x2="206" y2="166"/>
+      <text class="bs" x="12" y="182">out ▸ CalibrationPoint,</text>
+      <text class="bs" x="12" y="194">open until step 5</text>
+    </g>
+    <!-- stage 4 -->
+    <g transform="translate(690,0)">
+      <rect class="sub" width="218" height="198" rx="6" stroke="#2f6fdb" stroke-width="1.6"/>
+      <circle cx="20" cy="22" r="11" fill="#2f6fdb"/><text class="badge" x="20" y="26">4</text>
+      <text class="sh" x="38" y="26">Act</text>
+      <text class="b"  x="12" y="52">each seat: agent.act()</text>
+      <text class="b"  x="12" y="68">search under a budget in</text>
+      <text class="b"  x="12" y="84">adjudications, not seconds</text>
+      <text class="b"  x="12" y="104">breaking a deal is priced,</text>
+      <text class="b"  x="12" y="120">never forbidden</text>
+      <text class="b"  x="12" y="140">each seat is handed only</text>
+      <text class="b"  x="12" y="156">the deals it knows about</text>
+      <line class="rule" x1="12" y1="166" x2="206" y2="166"/>
+      <text class="bs" x="12" y="182">out ▸ Order[] + one</text>
+      <text class="bs" x="12" y="194">DecisionTrace per seat</text>
+    </g>
+    <!-- stage 5 -->
+    <g transform="translate(920,0)">
+      <rect class="sub" width="218" height="198" rx="6"/>
+      <circle cx="20" cy="22" r="11" fill="#2f6fdb"/><text class="badge" x="20" y="26">5</text>
+      <text class="sh" x="38" y="26">Resolve &amp; grade</text>
+      <text class="b"  x="12" y="52">all four seats&#8217; orders are</text>
+      <text class="b"  x="12" y="68">adjudicated at once</text>
+      <text class="b"  x="12" y="88">every promise graded kept</text>
+      <text class="b"  x="12" y="104">or broken, and by whom</text>
+      <text class="b"  x="12" y="124">a pact its breaker walked</text>
+      <text class="b"  x="12" y="140">out of releases the rest</text>
+      <line class="rule" x1="12" y1="156" x2="206" y2="156"/>
+      <text class="bs" x="12" y="172">out ▸ state&#8242;, Outcome[],</text>
+      <text class="bs" x="12" y="186">resolution log, closed points</text>
+    </g>
+    <!-- stage 6 -->
+    <g transform="translate(1150,0)">
+      <rect class="sub" width="218" height="198" rx="6"/>
+      <circle cx="20" cy="22" r="11" fill="#2f6fdb"/><text class="badge" x="20" y="26">6</text>
+      <text class="sh" x="38" y="26">Accuse</text>
+      <text class="b"  x="12" y="52">agents decide what to tell</text>
+      <text class="b"  x="12" y="68">the table; the engine then</text>
+      <text class="b"  x="12" y="84">stamps a verdict:</text>
+      <text class="mono" x="12" y="104" fill="#2e7d57">CONFIRMED</text>
+      <text class="mono" x="12" y="120" fill="#c2453f">REFUTED</text>
+      <text class="mono" x="12" y="136" fill="#9a6b12">UNVERIFIED</text>
+      <text class="bm" x="12" y="154">unverified still moves opinion</text>
+      <line class="rule" x1="12" y1="164" x2="206" y2="164"/>
+      <text class="bs" x="12" y="180">out ▸ Broadcast[], and the</text>
+      <text class="bs" x="12" y="192">gossip everyone heard</text>
+    </g>
+    <!-- stage 7 -->
+    <g transform="translate(1380,0)">
+      <rect class="sub" width="218" height="198" rx="6"/>
+      <circle cx="20" cy="22" r="11" fill="#2f6fdb"/><text class="badge" x="20" y="26">7</text>
+      <text class="sh" x="38" y="26">Learn</text>
+      <text class="b"  x="12" y="52">rules fire on what each</text>
+      <text class="b"  x="12" y="68">agent was allowed to see</text>
+      <text class="b"  x="12" y="88">Beta records move: α+1 on</text>
+      <text class="b"  x="12" y="104">a kept deal, β+w on a break</text>
+      <text class="b"  x="12" y="124">opponent profiles absorb</text>
+      <text class="b"  x="12" y="140">the orders that were played</text>
+      <line class="rule" x1="12" y1="156" x2="206" y2="156"/>
+      <text class="bs" x="12" y="172">out ▸ BeliefSnapshot[] and</text>
+      <text class="bs" x="12" y="186">the TurnRecord</text>
+    </g>
+
+    <g>
+      <line class="flow" x1="220" y1="99" x2="228" y2="99"/>
+      <line class="flow" x1="450" y1="99" x2="458" y2="99"/>
+      <line class="flow" x1="680" y1="99" x2="688" y2="99"/>
+      <line class="flow" x1="910" y1="99" x2="918" y2="99"/>
+      <line class="flow" x1="1140" y1="99" x2="1148" y2="99"/>
+      <line class="flow" x1="1370" y1="99" x2="1378" y2="99"/>
+    </g>
+  </g>
+
+  <g transform="translate(20,256)">
+    <rect class="form" width="1600" height="56" rx="6"/>
+    <text class="bs"  x="14" y="19">WHAT THE TURN LEAVES BEHIND — appended to history[] and never mutated again</text>
+    <text class="fm"  x="14" y="37">TurnRecord(state, orders, outcomes, log, traces, messages, beliefs, commitments, nodes)</text>
+    <text class="bs"  x="14" y="50">read back by: the dashboard&#8217;s scrubber and every panel · /api/…/replay · save_replay() · every metric and figure in the report</text>
+    <path class="flowa" d="M1240,28 L1360,28"/>
+    <text class="bs" x="1370" y="24">the only channel out</text>
+    <text class="bs" x="1370" y="38">of the simulation</text>
+  </g>
+</g>
+
+<line class="flowa" x1="768" y1="846" x2="768" y2="874" marker-end="url(#ara)"/>
+<text class="bs" x="778" y="866">step 4 expands ▾</text>
+
+<!-- ══════════ ROW 3 · INSIDE ONE AGENT ══════════ -->
+<g transform="translate(40,874)">
+  <rect class="panel" width="1640" height="784" rx="8"/>
+  <text class="ph" x="16" y="26">INSIDE ONE AGENT</text>
+  <text class="pf" x="190" y="26">src/agents/agent.py — four of these per game: identical code, different persona parameters</text>
+
+  <!-- ─ negotiation ─ -->
+  <g transform="translate(20,44)">
+    <rect class="sub" width="430" height="300" rx="6"/>
+    <text class="sh" x="12" y="22">NEGOTIATION STRATEGY</text>
+    <text class="pf" x="12" y="37">src/agents/negotiation/strategy.py</text>
+
+    <text class="b" x="12" y="60" font-weight="650">What it asks for</text>
+    <text class="bul" x="12" y="77">•</text><text class="b" x="24" y="77">candidate deals per rival, ranked by the counterfactual</text>
+    <text class="bul" x="12" y="93">•</text><text class="b" x="24" y="93">top 2 per rival survive; floor MIN_DEAL_VALUE = 0.05</text>
+    <text class="bul" x="12" y="109">•</text><text class="b" x="24" y="109">a 3-way pact when the leader is ≥ 2 centres ahead</text>
+    <text class="bul" x="12" y="125">•</text><text class="b" x="24" y="125">a threat when exposure &#62; 0.3 and none sent for 3 turns</text>
+    <text class="bul" x="12" y="141">•</text><text class="b" x="24" y="141">privacy (persona) decides whether it goes on the record</text>
+
+    <text class="b" x="12" y="166" font-weight="650">What it agrees to</text>
+    <g transform="translate(12,174)">
+      <rect class="form" width="406" height="34" rx="5"/>
+      <text class="fm" x="10" y="15">P(keep)·V_kept + (1 − P(keep))·V_broken  &#62;  V_none</text>
+      <text class="bs" x="10" y="28">my exposure sits inside V_broken: there I am the one still keeping my side</text>
+    </g>
+    <text class="bul" x="12" y="228">•</text><text class="b" x="24" y="228">fails? halve the term, or give back a DMZ square → COUNTER</text>
+    <text class="bul" x="12" y="244">•</text><text class="b" x="24" y="244">that is what makes rounds 2 and 3 do any work</text>
+    <text class="bul" x="12" y="260">•</text><text class="b" x="24" y="260">every sentence now carries its own arithmetic (rationale)</text>
+    <text class="bul" x="12" y="276">•</text><text class="b" x="24" y="276">_record_price(): what I signed it for, and on which turn</text>
+    <text class="bs" x="24" y="291">Sincerity is never decided here. The planner re-optimises afterwards.</text>
+  </g>
+
+  <!-- ─ personas ─ -->
+  <g transform="translate(20,356)">
+    <rect class="sub" width="430" height="164" rx="6"/>
+    <text class="sh" x="12" y="22">PERSONAS — parameters, never branches</text>
+    <text class="pf" x="12" y="37">src/agents/negotiation/personas.py</text>
+    <g transform="translate(12,52)">
+      <text class="bs" x="0" y="10">name</text>
+      <text class="bs" x="104" y="10">rep cost</text>
+      <text class="bs" x="176" y="10">prior</text>
+      <text class="bs" x="252" y="10">veng</text>
+      <text class="bs" x="312" y="10">decep</text>
+      <text class="bs" x="372" y="10">priv</text>
+      <line class="rule" x1="0" y1="16" x2="406" y2="16"/>
+      <text class="mono" x="0" y="32" fill="#2e7d57">Honest</text>
+      <text class="mono" x="104" y="32">5.0</text><text class="mono" x="176" y="32">1,1</text><text class="mono" x="252" y="32">0.0</text><text class="mono" x="312" y="32">0.0</text><text class="mono" x="372" y="32">0.0</text>
+      <text class="mono" x="0" y="50">Opportunist</text>
+      <text class="mono" x="104" y="50">1.0</text><text class="mono" x="176" y="50">1,1</text><text class="mono" x="252" y="50">0.0</text><text class="mono" x="312" y="50">0.6</text><text class="mono" x="372" y="50">0.8</text>
+      <text class="mono" x="0" y="68" fill="#c2453f">Vengeful</text>
+      <text class="mono" x="104" y="68">2.0</text><text class="mono" x="176" y="68">1,1</text><text class="mono" x="252" y="68">1.5</text><text class="mono" x="312" y="68">0.2</text><text class="mono" x="372" y="68">0.3</text>
+      <text class="mono" x="0" y="86" fill="#9a6b12">Paranoid</text>
+      <text class="mono" x="104" y="86">1.0</text><text class="mono" x="176" y="86">1,3</text><text class="mono" x="252" y="86">0.3</text><text class="mono" x="312" y="86">0.1</text><text class="mono" x="372" y="86">0.6</text>
+    </g>
+    <text class="bs" x="12" y="156">A branch on the persona name would break the design: they differ only by these numbers.</text>
+  </g>
+
+  <!-- ─ stance ─ -->
+  <g transform="translate(20,532)">
+    <rect class="sub" width="430" height="232" rx="6"/>
+    <text class="sh" x="12" y="22">SOCIAL POSITION — what it will pay to punish</text>
+    <text class="bul" x="12" y="44">•</text><text class="b" x="24" y="44">grudge: +1 per betrayal suffered, × 0.75 a turn,</text>
+    <text class="b" x="24" y="60">forgotten below 0.05</text>
+    <text class="bul" x="12" y="78">•</text><text class="b" x="24" y="78">deterrence: a threat is believed in proportion to how</text>
+    <text class="b" x="24" y="94">often that sender has actually retaliated; × 0.5 a turn</text>
+    <g transform="translate(12,104)">
+      <rect class="form" width="406" height="32" rx="5"/>
+      <text class="fm" x="10" y="14">stance(p) = vengeance × grudge(p) − 0.4 × deterrence(p)</text>
+      <text class="bs" x="10" y="27">positive: I pay board value to hurt them · negative: attacking them costs more</text>
+    </g>
+    <line class="rule" x1="12" y1="152" x2="418" y2="152"/>
+    <text class="b" x="12" y="172" font-weight="650">Two variants of the same agent</text>
+    <text class="bul" x="12" y="190">•</text><text class="b" x="24" y="190">HumanAgent — identical trust, opponent and belief</text>
+    <text class="b" x="24" y="206">machinery; only orders and answers are swapped for a person</text>
+    <text class="bul" x="12" y="224">•</text><text class="b" x="24" y="224">ChaosAgent — 7 modes of malformed play; the grammar gate</text>
+    <text class="b" x="24" y="238">is what keeps it harmless (src/agents/chaos.py)</text>
+  </g>
+
+  <!-- ─ planner ─ -->
+  <g transform="translate(470,44)">
+    <rect class="sub" width="560" height="720" rx="6" stroke="#2f6fdb" stroke-width="1.6"/>
+    <text class="sh" x="12" y="22">PLANNER — the decision</text>
+    <text class="pf" x="12" y="37">src/agents/planner/planner.py · find_best_orders() → (Order[], DecisionTrace)</text>
+
+    <g transform="translate(12,48)">
+      <rect class="form" width="536" height="52" rx="5"/>
+      <text class="bs" x="10" y="15">POSITION VALUE — everything in the system is denominated in centres</text>
+      <text class="fm" x="10" y="32">value = 1.0·centres + 0.3·units + 0.2·threatens − 0.2·under threat + 0.01·mobility</text>
+      <text class="bs" x="10" y="46">so a trace reads in the same units as the worked example on the slide</text>
+    </g>
+
+    <g transform="translate(12,110)">
+      <circle cx="10" cy="10" r="9" fill="#2f6fdb"/><text class="badge" x="10" y="14">1</text>
+      <text class="b" x="28" y="14" font-weight="650">Enumerate</text>
+      <text class="b" x="112" y="14">generate_all_order_sets() — up to 300 legal sets</text>
+    </g>
+    <g transform="translate(12,140)">
+      <circle cx="10" cy="10" r="9" fill="#2f6fdb"/><text class="badge" x="10" y="14">2</text>
+      <text class="b" x="28" y="14" font-weight="650">Prune</text>
+      <text class="b" x="112" y="14">Pareto dominance against two extreme worlds:</text>
+      <text class="b" x="112" y="30">everyone holds, everyone attacks. A set is dropped only if</text>
+      <text class="b" x="112" y="46">another does at least as well in both. Beam width 8.</text>
+      <text class="bs" x="112" y="62">Loyal and treacherous sets are pruned <tspan font-weight="650">separately</tspan> — an option is never</text>
+      <text class="bs" x="112" y="75">discarded merely for keeping a promise.</text>
+    </g>
+    <g transform="translate(12,228)">
+      <circle cx="10" cy="10" r="9" fill="#2f6fdb"/><text class="badge" x="10" y="14">3</text>
+      <text class="b" x="28" y="14" font-weight="650">Pass 1</text>
+      <text class="b" x="112" y="14">score every survivor, flag which ones break a deal</text>
+      <text class="b" x="112" y="30">only now is ι knowable: the gain a break buys <tspan font-weight="650">over the best</tspan></text>
+      <text class="b" x="112" y="46"><tspan font-weight="650">loyal option</tspan> — which is why the passes cannot be merged</text>
+    </g>
+    <g transform="translate(12,288)">
+      <circle cx="10" cy="10" r="9" fill="#2f6fdb"/><text class="badge" x="10" y="14">4</text>
+      <text class="b" x="28" y="14" font-weight="650">Price it</text>
+      <text class="b" x="112" y="14">two charges, and no &#8220;betray&#8221; flag anywhere</text>
+    </g>
+    <g transform="translate(112,308)">
+      <rect class="form" width="436" height="88" rx="5"/>
+      <text class="fm" x="10" y="17">penalty  = Vcoop(partner) × ΔP × (turns left / 12) × persona rep cost</text>
+      <text class="bs" x="10" y="31">near the horizon the last term shrinks; mid-game Vcoop collapses once the partner</text>
+      <text class="bs" x="10" y="44">stops being useful. Either way the same arithmetic stops paying for loyalty.</text>
+      <text class="fm" x="10" y="62">forfeit = signed price × share of term unused × FORFEIT_WEIGHT 1.0</text>
+      <text class="bs" x="10" y="76">without this, breaking cost ~1/20th of what signing had been credited with</text>
+    </g>
+    <g transform="translate(12,406)">
+      <text class="b" x="112" y="14">Vcoop = my centres their units border (× 0.3 where I already</text>
+      <text class="b" x="112" y="30">garrison it) + 0.5 × the unowned centres we can both reach</text>
+    </g>
+    <g transform="translate(12,450)">
+      <circle cx="10" cy="10" r="9" fill="#2f6fdb"/><text class="badge" x="10" y="14">5</text>
+      <text class="b" x="28" y="14" font-weight="650">Search</text>
+      <text class="b" x="112" y="14">depth-2 expectiminimax: my move, their sampled reply</text>
+      <text class="mono" x="112" y="32">opponent_samples 32 · beam 8 · depth2 4×6×6</text>
+      <text class="mono" x="112" y="48">retaliation_samples 1 · node_budget 1500</text>
+      <text class="b" x="112" y="66">the budget is in <tspan font-weight="650">adjudications</tspan>, so the MCTS variant can be</text>
+      <text class="b" x="112" y="82">handed exactly the same one and the comparison is fair</text>
+      <text class="bs" x="112" y="98">extra depth-2 worlds put the players I just betrayed on my border</text>
+    </g>
+    <g transform="translate(12,562)">
+      <circle cx="10" cy="10" r="9" fill="#2f6fdb"/><text class="badge" x="10" y="14">6</text>
+      <text class="b" x="28" y="14" font-weight="650">Stance</text>
+      <text class="b" x="112" y="14">vengeance × grudge is added as real board value paid,</text>
+      <text class="b" x="112" y="30">so revenge shows up in the trace as a cost, not a mood</text>
+    </g>
+    <line class="rule" x1="12" y1="610" x2="548" y2="610"/>
+    <text class="b" x="12" y="630" font-weight="650">Out: one DecisionTrace per turn per seat</text>
+    <text class="mono" x="12" y="650">EV · penalty · penalty_rows(partner, Vcoop, ΔP, horizon, cost)</text>
+    <text class="mono" x="12" y="666">forfeit_rows · nodes · candidates · pruned · vengeance · reversals</text>
+    <text class="b"  x="12" y="686">&#8220;The planner chose X&#8221; is not an explanation.</text>
+    <text class="fm" x="12" y="702">&#8220;Vcoop 0.80 × ΔP 0.06 × horizon 0.83&#8221; is — and the UI prints exactly that.</text>
+  </g>
+
+  <!-- ─ trust ─ -->
+  <g transform="translate(1050,44)">
+    <rect class="sub" width="570" height="330" rx="6"/>
+    <text class="sh" x="12" y="22">TRUST &amp; BELIEF</text>
+    <text class="pf" x="12" y="37">src/agents/trust/model.py — one Beta(α, β) per (player, promise type)</text>
+
+    <text class="bul" x="12" y="60">•</text><text class="b" x="24" y="60">trust is not one number per player: somebody reliable about</text>
+    <text class="b" x="24" y="76">DMZs may be worthless on alliances</text>
+    <text class="bul" x="12" y="94">•</text><text class="b" x="24" y="94">a second record per (player, <tspan font-weight="650">me</tspan>, type): does this one keep</text>
+    <text class="b" x="24" y="110">promises <tspan font-weight="650">to me</tspan>, which is the question that decides a signature</text>
+
+    <g transform="translate(12,120)">
+      <rect class="form" width="546" height="50" rx="5"/>
+      <text class="fm" x="10" y="17">kept → α + 1     broken → β + w,   w = max(0.1, 1 − λ·ι),  λ = 0.2</text>
+      <text class="bs" x="10" y="31">a gratuitous betrayal costs a full point of reputation; a lucrative one less, it explains itself</text>
+      <text class="fm" x="10" y="45">old evidence decays × 0.85 before each update</text>
+    </g>
+    <g transform="translate(12,178)">
+      <rect class="form" width="546" height="34" rx="5"/>
+      <text class="fm" x="10" y="15">reliability = w·pair + (1 − w)·general,   w = n / (n + 2)</text>
+      <text class="bs" x="10" y="28">one observation is not a pattern, so the pair record is shrunk toward the reputation until it has weight</text>
+    </g>
+    <g transform="translate(12,220)">
+      <rect class="form" width="546" height="50" rx="5"/>
+      <text class="bs" x="10" y="14">THE CPT — a reliable partner with a lot on offer is <tspan font-weight="650">not</tspan> a safe bet, which a Beta mean alone cannot say</text>
+      <text class="fm" x="10" y="31">P(keep) = (1−i)·[0.2 + 0.8·r]  +  i·[0.35·r],    i = min(1, ι / 0.1)</text>
+      <text class="bs" x="10" y="45">floor 0.2 and tempted 0.35 are <tspan font-weight="650">fitted</tspan> by sweep.fit_cpt against logged (r, ι, kept?) triples — not chosen</text>
+    </g>
+    <text class="bul" x="12" y="288">•</text><text class="b" x="24" y="288">reputation_drop() → ΔP: what breaking costs <tspan font-weight="650">my</tspan> standing. The agent</text>
+    <text class="b" x="24" y="304">keeps its own record too, because outcomes are public</text>
+    <text class="bs" x="24" y="320">snapshot() → BeliefSnapshot[] → the Trust tab and the Inspector&#8217;s two-layer table</text>
+  </g>
+
+  <!-- ─ opponent model ─ -->
+  <g transform="translate(1050,386)">
+    <rect class="sub" width="570" height="160" rx="6"/>
+    <text class="sh" x="12" y="22">OPPONENT MODEL — public information only</text>
+    <text class="pf" x="12" y="37">src/agents/opponent_model/ — the deck&#8217;s optional component, first in the cut order</text>
+    <text class="bul" x="12" y="60">•</text><text class="b" x="24" y="60">a running profile per rival: aggression ratio, cooperation ratio,</text>
+    <text class="b" x="24" y="76">trust-keeping rate, and a guessed persona from those three</text>
+    <text class="bul" x="12" y="94">•</text><text class="b" x="24" y="94">retaliation_rate() — how much a threat from them is worth believing</text>
+    <text class="bul" x="12" y="112">•</text><text class="b" x="24" y="112">sample_opponent_orders() — weighted joint worlds for the planner,</text>
+    <text class="b" x="24" y="128">resolved through the <tspan font-weight="650">real</tspan> adjudicator, never an approximation of it</text>
+    <text class="bs" x="24" y="146">With no history it degrades to the uniform fallback; nothing else changes if it is removed.</text>
+  </g>
+
+  <!-- ─ accusation ─ -->
+  <g transform="translate(1050,558)">
+    <rect class="sub" width="570" height="206" rx="6"/>
+    <text class="sh" x="12" y="22">ACCUSATION POLICY — the agent&#8217;s decision, not the engine&#8217;s</text>
+    <text class="pf" x="12" y="37">Agent.consider_broadcast()</text>
+    <text class="b" x="12" y="60" font-weight="650">Truthful</text>
+    <text class="b" x="80" y="60">say it only if my standing exceeds 0.6, the betrayer still</text>
+    <text class="b" x="80" y="76">has units, and the engine can confirm me — or at least cannot refute me</text>
+    <text class="b" x="12" y="98" font-weight="650">False</text>
+    <text class="b" x="80" y="98">only against the leader, and only when the arithmetic says so:</text>
+    <g transform="translate(80,106)">
+      <rect class="form" width="478" height="46" rx="5"/>
+      <text class="fm" x="10" y="16">risk = 2.0 × (1 − deception),  × 0.25 when no public deal exists to refute me</text>
+      <text class="bs" x="10" y="30">accuse when (their centres − mine) &#62; risk. A pairing with no public deal cannot be</text>
+      <text class="bs" x="10" y="42">refuted — which is exactly what a liar picks. Only their own standing argues against it.</text>
+    </g>
+    <text class="bs" x="12" y="172">With probability = deception it overreaches instead and names a deal the leader visibly kept, gets REFUTED,</text>
+    <text class="bs" x="12" y="186">and pays for it — otherwise lying would never be measured at all.</text>
+    <text class="bs" x="12" y="200">A human seat accuses through the UI; the chaos seat accuses at random.</text>
+  </g>
+</g>
+
+<line class="flowa" x1="768" y1="1658" x2="768" y2="1686" marker-end="url(#ara)"/>
+<text class="bs" x="778" y="1678">orders go to the engine ▾</text>
+
+<!-- ══════════ ROW 4 · GRADING AND LEARNING ══════════ -->
+<g transform="translate(40,1686)">
+  <rect class="panel" width="1640" height="376" rx="8"/>
+  <text class="ph" x="16" y="26">HOW A PROMISE IS GRADED — AND WHAT THAT CHANGES</text>
+  <text class="pf" x="470" y="26">the one property the whole trust model rests on: kept and broken are facts, not opinions</text>
+
+  <g transform="translate(20,44)">
+    <rect class="sub" width="520" height="312" rx="6"/>
+    <text class="sh" x="12" y="22">WHAT THE ENGINE CHECKS</text>
+    <text class="pf" x="12" y="37">src/engine/adjudicator.py · verify_commitments()</text>
+    <g transform="translate(12,50)">
+      <text class="mono" y="16" fill="#1e4a93">Alliance</text>
+      <text class="b" x="78" y="16">no member orders a move into another</text>
+      <text class="b" x="78" y="31">member&#8217;s units or owned centres — written over</text>
+      <text class="b" x="78" y="46">every ordered pair, so a 3-way pact binds all 3</text>
+      <text class="mono" y="72" fill="#1e4a93">Support</text>
+      <text class="b" x="78" y="72">the promised support order is present;</text>
+      <text class="b" x="78" y="87">support_hold is the same deal with no origin</text>
+      <text class="mono" y="113" fill="#1e4a93">DMZ</text>
+      <text class="b" x="78" y="113">neither side orders a move into the listed</text>
+      <text class="b" x="78" y="128">squares, for the agreed number of turns</text>
+      <text class="mono" y="154" fill="#1e4a93">Exchange</text>
+      <text class="b" x="78" y="154">two legs, different players, different turns:</text>
+      <text class="b" x="78" y="169">support now, stay out later. Only the leg that is</text>
+      <text class="b" x="78" y="184">due can be broken — take the support, then do not pay.</text>
+    </g>
+    <line class="rule" x1="12" y1="256" x2="508" y2="256"/>
+    <text class="bs" x="12" y="274">Every accepted proposal passes invalid_proposal_reason() first: a 999-turn alliance over</text>
+    <text class="bs" x="12" y="288">territories that do not exist never reaches the planner. That is what the chaos agent tests.</text>
+    <text class="bs" x="12" y="302">A pact one member walked out of dissolves — the loyal members are released, not still bound.</text>
+  </g>
+
+  <g transform="translate(560,44)">
+    <rect class="sub" width="520" height="312" rx="6"/>
+    <text class="sh" x="12" y="22">WHAT EACH AGENT IS ALLOWED TO SEE</text>
+    <text class="pf" x="12" y="37">src/agents/trust/rules.py · RuleEngine is the only writer during a game</text>
+    <g transform="translate(12,48)">
+      <text class="b" y="16" font-weight="650">in the deal</text>
+      <text class="bm" x="108" y="16">first hand — moves the reputation <tspan font-weight="650">and</tspan> the pair record</text>
+      <text class="b" y="36" font-weight="650">public, not mine</text>
+      <text class="bm" x="108" y="36">the engine published it, so I saw it: reputation only</text>
+      <text class="b" y="56" font-weight="650">private, not mine</text>
+      <text class="bm" x="108" y="56">invisible — unless it leaks (PRIVATE_LEAK_RATE)</text>
+    </g>
+    <line class="rule" x1="12" y1="116" x2="508" y2="116"/>
+    <g transform="translate(12,128)">
+      <text class="mono" y="14" fill="#2e7d57">R1 OutcomeRule</text>
+      <text class="b" x="152" y="14">a deal I was in → α+1 or β+w, both layers</text>
+      <text class="mono" y="38" fill="#2e7d57">R5 PublicRecordRule</text>
+      <text class="b" x="152" y="38">a public deal between two others →</text>
+      <text class="b" x="152" y="53">general record only. Without this the two layers</text>
+      <text class="b" x="152" y="68">saw identical evidence and could never disagree.</text>
+      <text class="mono" y="92" fill="#9a6b12">R3 GossipRule</text>
+      <text class="b" x="152" y="92">fires on CONFIRMED <tspan font-weight="650">or UNVERIFIED</tspan> claims from</text>
+      <text class="b" x="152" y="107">a sender I rate above 0.6 — 41% of all damage</text>
+      <text class="mono" y="131" fill="#c2453f">R4 FalseAccusationRule</text>
+      <text class="b" x="152" y="131">a REFUTED accusation lands on</text>
+      <text class="b" x="152" y="146">the accuser, across <tspan font-weight="650">every</tspan> promise type, weight 2.0 —</text>
+      <text class="b" x="152" y="161">what was observed is the liar, not the deal</text>
+    </g>
+    <text class="bs" x="12" y="302">Every change emits a TrustTrace naming the rule and its inputs. An untraceable belief update is a bug.</text>
+  </g>
+
+  <g transform="translate(1100,44)">
+    <rect class="sub" width="520" height="312" rx="6"/>
+    <text class="sh" x="12" y="22">DOES ANY OF IT MEAN ANYTHING?</text>
+    <text class="pf" x="12" y="37">src/evaluation/metrics.py — the evidence behind every claim in the report</text>
+    <text class="b" x="12" y="60" font-weight="650">Calibration</text>
+    <text class="b" x="12" y="76">each P(keep) logged at step 3 is paired with the engine&#8217;s</text>
+    <text class="b" x="12" y="92">verdict at step 5 → Brier score and a reliability diagram.</text>
+    <text class="bs" x="12" y="107">0 is perfect, 0.25 is what saying &#8220;50%&#8221; every time scores.</text>
+    <text class="b" x="12" y="132" font-weight="650">Preference reversals</text>
+    <text class="b" x="12" y="148">the negotiator prices a deal assuming the partner honours it;</text>
+    <text class="b" x="12" y="164">the planner picks orders against a partner sampled from what</text>
+    <text class="b" x="12" y="180">they usually do. Both are the same agent. How often they</text>
+    <text class="b" x="12" y="196">disagree about one promise, in one turn, is a measured number.</text>
+    <text class="b" x="12" y="221" font-weight="650">Vcoop and forfeit at the moment of the break</text>
+    <text class="b" x="12" y="237">what loyalty was actually worth when it was dropped —</text>
+    <text class="b" x="12" y="253">the figure that shows betrayal is priced, not triggered.</text>
+    <text class="b" x="12" y="278" font-weight="650">Adjudications per turn</text>
+    <text class="b" x="12" y="294">the honest cost axis for expectiminimax vs MCTS.</text>
+  </g>
+
+  <path class="flowa" d="M1080,200 L1096,200"/>
+  <path class="flowa" d="M540,200 L556,200"/>
+</g>
+
+<!-- ══════════ ROW 5 · SURFACES ══════════ -->
+<g transform="translate(40,2090)">
+  <rect class="panel" width="1640" height="310" rx="8"/>
+  <text class="ph" x="16" y="26">SURFACES — everything that reads the history</text>
+  <text class="pf" x="420" y="26">nothing below owns a turn loop, a rule, or a number of its own</text>
+
+  <g transform="translate(20,44)">
+    <rect class="sub" width="385" height="248" rx="6"/>
+    <text class="sh" x="12" y="22">HTTP API</text>
+    <text class="pf" x="12" y="37">src/ui/app.py · FastAPI</text>
+    <text class="mono" x="12" y="60">GET  /api/board</text>
+    <text class="monod" x="12" y="73">     map, players, personas</text>
+    <text class="mono" x="12" y="91">GET  /api/knobs</text>
+    <text class="monod" x="12" y="104">     every tunable constant</text>
+    <text class="mono" x="12" y="122">POST /api/game/new</text>
+    <text class="monod" x="12" y="135">     a whole GameConfig → id</text>
+    <text class="mono" x="12" y="153">GET  /…/state  /…/pending</text>
+    <text class="mono" x="12" y="169">POST /…/step   /…/save</text>
+    <text class="mono" x="12" y="185">GET  /…/replay · /api/replays</text>
+    <text class="mono" x="12" y="201" fill="#1e4a93">GET  /…/inspect/{seat}</text>
+    <text class="monod" x="12" y="214">     live arithmetic, re-derived</text>
+    <text class="bs" x="12" y="234">Private deals are withheld from a seated human.</text>
+    <text class="bs" x="12" y="246">32 games in memory, one lock each; no CORS.</text>
+  </g>
+
+  <g transform="translate(425,44)">
+    <rect class="sub" width="385" height="248" rx="6"/>
+    <text class="sh" x="12" y="22">DASHBOARD</text>
+    <text class="pf" x="12" y="37">web/src · React + Vite, built into web/dist</text>
+    <text class="b" x="12" y="60">board · scoreboard · turn scrubber · human seat</text>
+    <text class="b" x="12" y="80">tabs: Log · Talks · Deals · Trust · Why · Calib</text>
+    <text class="b" x="12" y="104" fill="#1e4a93" font-weight="650">verbose ⇒ Think</text>
+    <text class="b" x="12" y="120">one turn per agent, in the order it lived it:</text>
+    <text class="bm" x="12" y="136">heard → offered → bound by → searched →</text>
+    <text class="bm" x="12" y="152">chose → graded, with the EV line behind</text>
+    <text class="bm" x="12" y="168">every accept, reject and counter</text>
+    <text class="b" x="12" y="192" font-weight="650">detailed mode ⇒ Inspector</text>
+    <text class="bm" x="12" y="208">every live deal priced three ways, the belief</text>
+    <text class="bm" x="12" y="224">table&#8217;s two layers, candidates, forfeits</text>
+    <text class="bs" x="12" y="242">← → scrub history · space steps the game</text>
+  </g>
+
+  <g transform="translate(830,44)">
+    <rect class="sub" width="385" height="248" rx="6"/>
+    <text class="sh" x="12" y="22">COMMAND LINE</text>
+    <text class="pf" x="12" y="37">scripts/</text>
+    <text class="mono" x="12" y="60">demo.py</text>
+    <text class="bm" x="140" y="60">a scripted betrayal, maths shown</text>
+    <text class="mono" x="12" y="82">play.py</text>
+    <text class="bm" x="140" y="82">human vs AI in the terminal</text>
+    <text class="mono" x="12" y="104">run_headless.py</text>
+    <text class="bm" x="140" y="104">one seeded game</text>
+    <text class="mono" x="12" y="126">run_tournament.py</text>
+    <text class="bm" x="140" y="126">win rates over N games</text>
+    <text class="mono" x="12" y="148">run_analysis.py</text>
+    <text class="bm" x="140" y="148">metrics + replay export</text>
+    <text class="mono" x="12" y="170">run_sweep.py</text>
+    <text class="bm" x="140" y="170">knob sweep, and the CPT fit</text>
+    <text class="mono" x="12" y="192">make_figures.py</text>
+    <text class="bm" x="140" y="192">figures/1…6 .png</text>
+    <line class="rule" x1="12" y1="210" x2="373" y2="210"/>
+    <text class="bs" x="12" y="228">All of them build their runner through the same</text>
+    <text class="bs" x="12" y="242">harness, from the same GameConfig.</text>
+  </g>
+
+  <g transform="translate(1235,44)">
+    <rect class="sub" width="385" height="248" rx="6"/>
+    <text class="sh" x="12" y="22">CONFIG, EVIDENCE, PROOF</text>
+    <text class="pf" x="12" y="37">src/common/config.py · src/harness.py · src/evaluation/</text>
+    <text class="b" x="12" y="60">GameConfig — seed, seating, search, budget, board</text>
+    <text class="b" x="12" y="76">(n_seats, homes, win_centers, max_turns), knobs</text>
+    <text class="bm" x="12" y="92">seating_for(seed) rotates personas modulo the persona</text>
+    <text class="bm" x="12" y="106">count, so every seat holds each one equally often</text>
+    <text class="bm" x="12" y="122">game_setup() installs board + knobs for one game</text>
+    <line class="rule" x1="12" y1="136" x2="373" y2="136"/>
+    <text class="b" x="12" y="154">figures: betrayal rate vs turn · Vcoop at break ·</text>
+    <text class="b" x="12" y="170">rating by horizon · turns to coalition ·</text>
+    <text class="b" x="12" y="186">reliability diagram · win rate vs node budget</text>
+    <text class="bm" x="12" y="206">deal mix · privacy &amp; lying · pair-trust divergence ·</text>
+    <text class="bm" x="12" y="220">alliance durations · accusation stats</text>
+    <text class="b" x="12" y="242" font-weight="650">tests/ — 14 files, 300 passing</text>
+  </g>
+</g>
+
+<!-- ══════════ FOOTER ══════════ -->
+<g transform="translate(40,2424)">
+  <line class="rule" x1="0" y1="0" x2="1640" y2="0"/>
+  <g transform="translate(0,20)">
+    <line class="flow" x1="0" y1="-4" x2="28" y2="-4"/>
+    <text class="bs" x="36" y="0">data flows this way</text>
+    <line class="flowa" x1="160" y1="-4" x2="188" y2="-4"/>
+    <text class="bs" x="196" y="0">the spine: a turn becomes a decision becomes a verdict</text>
+    <rect class="form" x="520" y="-13" width="18" height="14" rx="3"/>
+    <text class="bs" x="546" y="0">a formula the code actually evaluates</text>
+    <text class="bs" x="820" y="0">ι = incentive to defect · ΔP = reputation a break costs · Vcoop = what a partner is worth</text>
+    <text class="bs" x="1380" y="0">docs/system-map.svg</text>
+  </g>
+</g>
+
+</svg>

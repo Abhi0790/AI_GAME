@@ -260,15 +260,15 @@ def test_a_broken_deal_stops_conditioning_the_partner_s_reply():
 
 # ── forfeiture: signing and breaking quote the same price ────────────────
 
-def _games(weight: float, seeds=range(12), budget=800):
+def _games(weight: float, seeds=range(24), budget=800):
     """A seeded corpus with one knob moved, sized so the claim below is not a
-    coin flip. At eight games and a 400-adjudication budget the two rates'
-    confidence intervals overlap, and per-persona shares swing 10 points on a
-    single seed; twelve games at 800 separates them and still runs in ~90s."""
+    coin flip. At twelve games the two rates' confidence intervals touch once
+    mirror support deals are dropped; twenty-four covers every table order
+    twice and separates them."""
     from src.common.config import GameConfig
-    from src.harness import apply_knobs, play
-    with apply_knobs({"FORFEIT_WEIGHT": weight}):
-        return [play(GameConfig(seed=s, node_budget=budget)) for s in seeds]
+    from src.harness import play_many
+    return play_many([GameConfig(seed=s, node_budget=budget,
+                                 knobs={"FORFEIT_WEIGHT": weight}) for s in seeds])
 
 
 def test_forfeiting_the_signed_price_cuts_preference_reversals():

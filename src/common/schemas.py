@@ -469,3 +469,14 @@ class CalibrationPoint(BaseModel):
     # instead of guessed at (issue #16).
     reliability: float = 0.5
     incentive: float = 0.0
+
+
+def mirrors(a: "Commitment", b: "Commitment") -> bool:
+    """Two support legs into the same square, each supporter the other's
+    beneficiary. Honouring both leaves both units supporting and nobody moving."""
+    legs = (CommitmentType.SUPPORT, CommitmentType.EXCHANGE)
+    return (a.commitment_type in legs and b.commitment_type in legs
+            and len(a.players) == len(b.players) == 2
+            and a.supported_from is not None and b.supported_from is not None
+            and a.target_territory == b.target_territory
+            and a.players[0] == b.players[1] and a.players[1] == b.players[0])

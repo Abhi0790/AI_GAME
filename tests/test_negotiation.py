@@ -242,7 +242,7 @@ def test_no_deals_with_a_player_about_to_win():
     units = [Unit(player=Player.RED, territory="R1"), Unit(player=Player.RED, territory="R2"),
              Unit(player=Player.BLUE, territory="B1"), Unit(player=Player.BLUE, territory="N1")]
     near = {"R1": Player.RED, "R2": Player.RED, "B1": Player.BLUE, "B2": Player.BLUE,
-            "N1": Player.BLUE, "N2": Player.BLUE}
+            "N1": Player.BLUE, "N2": Player.BLUE, "G1": Player.BLUE}
     state = GameState(turn=3, units=units, supply_centers=near,
                       territory_owners={u.territory: u.player for u in units})
     offer = Message(id="m", sender=Player.BLUE, receiver=Player.RED,

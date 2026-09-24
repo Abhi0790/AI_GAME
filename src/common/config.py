@@ -29,6 +29,15 @@ from src.engine.board import (
 # personas the order simply repeats.
 PERSONA_ORDER: List[str] = ["Opportunist", "Honest", "Paranoid", "Vengeful"]
 
+# Rotation alone never changes who sits next to whom, so every persona kept the
+# same neighbours in every game. Each block of four seeds uses the next of the
+# three distinct orders round a four-seat ring; twelve seeds cover them all.
+TABLE_ORDERS: List[List[str]] = [
+    PERSONA_ORDER,
+    ["Opportunist", "Honest", "Vengeful", "Paranoid"],
+    ["Opportunist", "Paranoid", "Honest", "Vengeful"],
+]
+
 
 def seating_for(seed: int, seats: Optional[List[Player]] = None) -> Dict[Player, str]:
     """Deal the personas round the table, offset by the seed.
@@ -42,8 +51,10 @@ def seating_for(seed: int, seats: Optional[List[Player]] = None) -> Dict[Player,
     exactly once, whatever the seat count.
     """
     seats = list(seats) if seats is not None else list(Player)[:DEFAULT_SEATS]
-    k = seed % len(PERSONA_ORDER)
-    return {seats[i]: PERSONA_ORDER[(i + k) % len(PERSONA_ORDER)]
+    n = len(PERSONA_ORDER)
+    order = TABLE_ORDERS[(seed // n) % len(TABLE_ORDERS)]
+    k = seed % n
+    return {seats[i]: order[(i + k) % n]
             for i in range(len(seats))}
 
 

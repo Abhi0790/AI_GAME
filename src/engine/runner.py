@@ -7,7 +7,7 @@ from src.common.schemas import (
 )
 from src.common.schemas import (
     message_to_commitment, commitment_key, invalid_proposal_reason, leaders,
-    obligated_parties,
+    obligated_parties, mirrors,
 )
 from src.engine import adjudicator
 from src.engine.adjudicator import resolve
@@ -165,6 +165,13 @@ class GameRunner:
                         continue
 
                 c = message_to_commitment(orig, rep.sender, self.state.turn)
+                mirror = next((e for e in self.commitments if mirrors(e, c)), None)
+                if mirror:
+                    log_lines.append(
+                        f"Deal dropped: {c.players[0].value} supporting "
+                        f"{c.players[1].value} into {c.target_territory} mirrors a "
+                        f"live deal the other way; both would support and neither move")
+                    continue
                 existing = next(
                     (e for e in self.commitments
                      if commitment_key(e) == commitment_key(c)), None)

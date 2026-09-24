@@ -26,7 +26,7 @@ def test_default_board_is_the_original_map():
     b = active()
     assert {t: set(n) for t, n in b.adjacency.items()} == ORIGINAL
     assert set(b.supply_centers) == set(ORIGINAL) - {"C1", "C2"}
-    assert b.win_centers == 5 and b.max_turns == 12
+    assert b.win_centers == 6 and b.max_turns == 12
     assert b.players == [Player.RED, Player.BLUE, Player.GREEN, Player.GOLD]
 
 
@@ -85,7 +85,7 @@ def test_a_hand_written_board_need_not_be_a_ring():
 def test_use_board_restores_the_previous_board():
     before = active()
     with use_board(ring_board(7)):
-        assert len(players()) == 7 and win_centers() == 10
+        assert len(players()) == 7 and win_centers() == 12
     assert active() is before
     assert len(players()) == 4
 

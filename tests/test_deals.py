@@ -637,3 +637,14 @@ class TestDirectionalDealsSurviveNegotiation:
         assert exchange_leg_due(old, 5) == "give", (
             "a renewed exchange still owes its support leg")
         assert exchange_leg_due(old, 9) == "repay"
+
+
+def test_mirror_support_deals_are_recognised():
+    from src.common.schemas import Commitment, CommitmentType, Player, mirrors
+    def leg(a, b, frm):
+        return Commitment(id=f"{a.value}{b.value}", commitment_type=CommitmentType.SUPPORT,
+                          players=[a, b], created_turn=1, valid_until_turn=1,
+                          target_territory="C1", supported_from=frm)
+    blue_for_green = leg(Player.BLUE, Player.GREEN, "G1")
+    assert mirrors(blue_for_green, leg(Player.GREEN, Player.BLUE, "B2"))
+    assert not mirrors(blue_for_green, leg(Player.BLUE, Player.GREEN, "G1"))

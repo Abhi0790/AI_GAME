@@ -33,7 +33,7 @@ DEFAULT_SEATS = 4
 DEFAULT_HOMES_PER_PLAYER = 2
 DEFAULT_MAX_TURNS = 12
 # Share of the board's centres that wins outright when no threshold is given.
-DEFAULT_WIN_FRACTION = 0.5
+DEFAULT_WIN_FRACTION = 0.6
 
 _CANVAS = 500.0
 _HOME_RADIUS = 175.0

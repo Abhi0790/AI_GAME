@@ -386,3 +386,65 @@ export function CalibPanel({ game, history }) {
     </>
   );
 }
+
+/* ── Turn summary ─────────────────────────────────────────────────── */
+
+const owners = (s) => s?.supply_centers ?? {};
+const sameOwners = (a, b) =>
+  Object.keys(owners(a)).every((t) => owners(a)[t] === owners(b)[t]);
+
+/** One turn in plain words: who gained and lost centres, what was signed and
+ * broken, how many moves bounced, and how long nothing has changed hands. */
+export function TurnSummary({ history, viewing, shown }) {
+  const step = history[viewing];
+  if (!step) return null;
+  const after = (i) => history[i + 1]?.state ?? shown;
+
+  const gained = {}, lost = {};
+  for (const [t, now] of Object.entries(owners(after(viewing)))) {
+    const was = owners(step.state)[t];
+    if (was === now) continue;
+    if (now) (gained[now] ??= []).push(t);
+    if (was) (lost[was] ??= []).push(t);
+  }
+  const log = step.log ?? [];
+  const signed = log.filter((l) => l.startsWith("Commitment created")).length;
+  const bounces = log.filter((l) => l.startsWith("Bounce")).length;
+  const broken = (step.outcomes ?? []).filter((o) => !o.kept);
+
+  let still = 0;
+  for (let i = viewing; i >= 0 && sameOwners(history[i].state, after(i)); i--) still++;
+
+  const who = (m) => Object.entries(m).map(([p, ts]) => (
+    <span key={p} className="chip"><Dot player={p} />{p} {ts.join(", ")}</span>
+  ));
+
+  return (
+    <div className="summary">
+      <h4>Turn {viewing + 1}</h4>
+      <div className="facts">
+        {Object.keys(gained).length
+          ? <div><span className="k good">took</span>{who(gained)}</div>
+          : <div><span className="k">took</span><span className="none">no centre changed hands</span></div>}
+        {!!Object.keys(lost).length && <div><span className="k bad">lost</span>{who(lost)}</div>}
+        <div>
+          <span className="k">deals</span>
+          <span>{signed} signed · </span>
+          <span className={broken.length ? "bad" : ""}>
+            {broken.length} broken
+            {broken.map((o, i) => (
+              <span key={i} className="chip">{o.commitment_type} by {o.broken_by.join(", ")}</span>
+            ))}
+          </span>
+        </div>
+        <div><span className="k">moves</span><span>{bounces} bounced</span></div>
+      </div>
+      {still >= 3 && (
+        <p className="stall">
+          No centre has changed hands for {still} turns. Units keep bouncing off
+          each other; only a deal can break the standoff.
+        </p>
+      )}
+    </div>
+  );
+}

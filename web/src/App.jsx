@@ -6,15 +6,19 @@ import Inspector from "./components/Inspector.jsx";
 import Seat, { collectOrders } from "./components/Seat.jsx";
 import ThinkPanel from "./components/Think.jsx";
 import {
-  LogPanel, TalksPanel, DealsPanel, TrustPanel, WhyPanel, CalibPanel,
+  LogPanel, TalksPanel, DealsPanel, TrustPanel, WhyPanel, CalibPanel, TurnSummary,
 } from "./components/Panels.jsx";
 
 const TABS = [
-  ["log", "Log"], ["talks", "Talks"], ["deals", "Deals"],
-  ["trust", "Trust"], ["why", "Why"], ["calib", "Calib"],
+  ["log", "Log", "Everything the engine did, newest first"],
+  ["talks", "Talks", "Every proposal, counter and reply this turn"],
+  ["deals", "Deals", "Promises in force this turn"],
+  ["trust", "Trust", "How reliable each player believes the others are"],
+  ["why", "Why", "Why each agent chose its orders, and what breaking a deal cost it"],
+  ["calib", "Calibration", "Whether the predicted chance a deal is kept matches what happened"],
 ];
 // Verbose mode adds one tab: the same turn, replayed per agent.
-const THINK = ["think", "Think"];
+const THINK = ["think", "Think", "The turn replayed step by step for each agent"];
 
 // The config a screenshot has to be reproducible from, in one line.
 const summarise = (c) => [
@@ -45,7 +49,7 @@ export default function App() {
   const [config, setConfig] = useState({
     seat: "", chaos: "", seed: "", search: "expectiminimax",
     node_budget: 1500, negotiation_rounds: 3, seating: {},
-    n_seats: 4, max_turns: 12, win_centers: "", win_fraction: 0.5, home_builds: true,
+    n_seats: 4, max_turns: 12, win_centers: "", win_fraction: 0.6, home_builds: true,
   });
   const [error, setError] = useState(null);
   const cancel = useRef(false);
@@ -95,13 +99,15 @@ export default function App() {
       ?? replay?.final_state ?? step.state;
   }, [step, history, viewing, game, replay]);
 
-  const scores = useMemo(() => {
+  const count = (s) => {
     const counts = {};
-    for (const owner of Object.values(shown?.supply_centers ?? {})) {
+    for (const owner of Object.values(s?.supply_centers ?? {})) {
       if (owner) counts[owner] = (counts[owner] ?? 0) + 1;
     }
     return counts;
-  }, [shown]);
+  };
+  const scores = useMemo(() => count(shown), [shown]);
+  const before = useMemo(() => (step ? count(step.state) : null), [step]);
 
   const refreshSeat = useCallback(async (g) => {
     if (!g?.human_seat || g.finished) { setPending(null); return; }
@@ -223,6 +229,28 @@ export default function App() {
               </option>
             ))}
           </select>
+          <label title="Replay each turn the way every agent went through it">
+            <input type="checkbox" checked={verbose}
+                   onChange={(e) => {
+                     setVerbose(e.target.checked);
+                     setTab(e.target.checked ? "think" : "log");
+                   }} />
+            {" "}verbose
+          </label>
+        </div>
+        <div className="ctl">
+          <button className="primary" onClick={newGame}>New game</button>
+          <button disabled={!game || game.finished || running} onClick={step1}>Step</button>
+          <button disabled={!game || game.finished || running} onClick={runAll}>Run all</button>
+          {running && <button onClick={() => { cancel.current = true; }}>Stop</button>}
+          <button disabled={!game || !history.length}
+                  onClick={() => api.saveReplay(game.id).catch((e) => setError(String(e)))}>
+            Save replay
+          </button>
+        </div>
+        <details className="setup" open={!game && !replay}>
+          <summary>Game setup <span>applies to the next New game</span></summary>
+        <div className="ctl">
           <label htmlFor="seed">seed</label>
           <input id="seed" type="number" className="sm" placeholder="random"
                  value={config.seed}
@@ -296,25 +324,8 @@ export default function App() {
               <option key={p} value={p}>{p}</option>
             ))}
           </select>
-          <label title="Replay each turn the way every agent went through it">
-            <input type="checkbox" checked={verbose}
-                   onChange={(e) => {
-                     setVerbose(e.target.checked);
-                     setTab(e.target.checked ? "think" : "log");
-                   }} />
-            {" "}verbose
-          </label>
         </div>
-        <div className="ctl">
-          <button className="primary" onClick={newGame}>New game</button>
-          <button disabled={!game || game.finished || running} onClick={step1}>Step</button>
-          <button disabled={!game || game.finished || running} onClick={runAll}>Run all</button>
-          {running && <button onClick={() => { cancel.current = true; }}>Stop</button>}
-          <button disabled={!game || !history.length}
-                  onClick={() => api.saveReplay(game.id).catch((e) => setError(String(e)))}>
-            Save replay
-          </button>
-        </div>
+        </details>
       </header>
 
       {error && (
@@ -325,6 +336,17 @@ export default function App() {
 
       <main className={[detail && "detailed", verbose && "verbose"].filter(Boolean).join(" ")}>
         <section className="stage">
+          {!game && !replay && (
+            <div className="intro">
+              <h2>Four agents negotiate, promise and sometimes betray each other.</h2>
+              <ol>
+                <li>Press <b>New game</b>. Setup is optional: leave it blank for a random seed.</li>
+                <li><b>Step</b> plays one turn (or press space); <b>Run all</b> plays to the end.</li>
+                <li>Drag the turn slider or use ← → to go back over past turns.</li>
+                <li>Click a player's card to open its internals: what it believed, priced and chose.</li>
+              </ol>
+            </div>
+          )}
           <Board board={board} state={shown} step={step} />
 
           <div className="scores">
@@ -339,7 +361,15 @@ export default function App() {
                   <span className="dot" style={{ background: COLOR[p] }} />
                   {p}
                 </div>
-                <div className="n">{scores[p] ?? 0}</div>
+                <div className="n">
+                  {scores[p] ?? 0}
+                  {before && (scores[p] ?? 0) !== (before[p] ?? 0) && (
+                    <span className={(scores[p] ?? 0) > (before[p] ?? 0) ? "up" : "down"}>
+                      {(scores[p] ?? 0) > (before[p] ?? 0) ? "+" : ""}
+                      {(scores[p] ?? 0) - (before[p] ?? 0)}
+                    </span>
+                  )}
+                </div>
                 <div className="sub">
                   {game?.personas?.[p] ?? ""}
                   {game?.human_seat === p ? " · you" : ""}
@@ -365,6 +395,8 @@ export default function App() {
             <button disabled={live} onClick={() => setViewing(history.length - 1)}>Live</button>
           </div>
 
+          <TurnSummary history={history} viewing={viewing} shown={shown} />
+
           {game?.human_seat && !game.finished && (
             <Seat seat={game.human_seat} turn={game.turn} pending={pending}
                   choices={choices} setChoices={setChoices}
@@ -374,8 +406,8 @@ export default function App() {
 
         <aside>
           <div className="tabs" role="tablist">
-            {(verbose ? [THINK, ...TABS] : TABS).map(([id, label]) => (
-              <button key={id} role="tab" aria-selected={tab === id}
+            {(verbose ? [THINK, ...TABS] : TABS).map(([id, label, hint]) => (
+              <button key={id} role="tab" aria-selected={tab === id} title={hint}
                       onClick={() => setTab(id)}>
                 {label}
               </button>

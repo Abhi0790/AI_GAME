@@ -121,6 +121,14 @@ export default function Board({ board, state, step, onPick, selected }) {
           })}
         </g>
       </svg>
+      <div className="legend">
+        <span><i className="ln ok" />move succeeded</span>
+        <span><i className="ln no" />move bounced</span>
+        <span><i className="ln sup" />support</span>
+        <span><i className="sw sc" />supply centre (larger)</span>
+        <span><i className="sw faded" />owned, empty</span>
+        <span>▲ unit</span>
+      </div>
     </div>
   );
 }
