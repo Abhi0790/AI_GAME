@@ -98,3 +98,59 @@ class BeliefSnapshot(BaseModel):
     alpha: float
     beta_param: float # Avoid clash with beta function
     expected_reliability: float
+
+
+# ── Traces & outcomes (shared: every component reads these, none owns them) ──
+
+class CommitmentOutcome:
+    """Engine's verdict on one commitment after a turn's orders."""
+    def __init__(self, commitment: Commitment, kept: bool, broken_by: List[Player]):
+        self.commitment = commitment
+        self.kept = kept
+        self.broken_by = broken_by
+
+class DecisionTrace:
+    """Planner's one-sentence account of why an order set was chosen."""
+    def __init__(self, candidate_orders: List[Order], expected_value: float, penalty: float, explanation: str, commitment_broken: bool = False):
+        self.candidate_orders = candidate_orders
+        self.expected_value = expected_value
+        self.penalty = penalty
+        self.explanation = explanation
+        self.commitment_broken = commitment_broken
+
+class TrustTrace:
+    """Trust model's account of which rule fired and on what inputs."""
+    def __init__(self, rule_name: str, facts: str, old_alpha: float, old_beta: float, new_alpha: float, new_beta: float, explanation: str):
+        self.rule_name = rule_name
+        self.facts = facts
+        self.old_alpha = old_alpha
+        self.old_beta = old_beta
+        self.new_alpha = new_alpha
+        self.new_beta = new_beta
+        self.explanation = explanation
+
+
+def commitment_key(c: "Commitment"):
+    """Identity of a deal, ignoring who asked. Red-Blue and Blue-Red are the
+    same alliance, and both sides propose it every turn, so without this the
+    same promise is counted (and priced) several times over."""
+    return (
+        c.commitment_type,
+        frozenset(c.players),
+        c.target_territory,
+        c.supported_from,
+        tuple(sorted(c.dmz_territories or [])),
+    )
+
+
+def message_to_commitment(msg: Message, accepted_by: Player, current_turn: int) -> Commitment:
+    """Translate an accepted proposal into an engine-checkable commitment."""
+    return Commitment(
+        id=msg.id,
+        commitment_type=msg.commitment_type,
+        players=[msg.sender, accepted_by],
+        valid_until_turn=current_turn + (msg.turns if msg.turns else 1),
+        target_territory=msg.target_territory,
+        supported_from=msg.supported_from,
+        dmz_territories=msg.dmz_territories,
+    )

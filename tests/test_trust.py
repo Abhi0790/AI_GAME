@@ -69,14 +69,17 @@ class TestTrustModel:
         m.update_from_outcome(outcome)
         assert m.get_reliability(Player.BLUE, CommitmentType.ALLIANCE) < 0.5
 
-    def test_does_not_track_self(self):
+    def test_tracks_own_public_record(self):
         m = TrustModel(Player.RED)
         c = Commitment(id="1", commitment_type=CommitmentType.ALLIANCE,
                        players=[Player.RED, Player.BLUE], valid_until_turn=5)
         outcome = CommitmentOutcome(commitment=c, kept=False, broken_by=[Player.RED])
         m.update_from_outcome(outcome)
-        # Should not have changed RED's own record (only tracks others)
-        assert Player.RED not in m.records
+        # Outcomes are public, so an agent scores its own record off the same
+        # evidence everyone else has. The planner needs it to price deltaP.
+        own = m.get_record(Player.RED, CommitmentType.ALLIANCE)
+        assert own.beta > 1.0
+        assert m.reputation_drop(Player.RED, CommitmentType.ALLIANCE) > 0
 
     def test_gossip_reduces_trust(self):
         m = TrustModel(Player.RED)
@@ -99,8 +102,7 @@ class TestRuleEngine:
         outcome = CommitmentOutcome(commitment=c, kept=True, broken_by=[])
         rule = OutcomeRule()
         traces = rule.evaluate(m, {'outcome': outcome, 'incentive_to_defect': 0.0})
-        assert len(traces) == 1
-        assert traces[0].rule_name == "R0: Kept Promise"
+        assert {t.rule_name for t in traces} == {"R0: Kept Promise"}
 
     def test_outcome_rule_gratuitous_betrayal(self):
         m = TrustModel(Player.RED)
@@ -109,8 +111,9 @@ class TestRuleEngine:
         outcome = CommitmentOutcome(commitment=c, kept=False, broken_by=[Player.BLUE])
         rule = OutcomeRule()
         traces = rule.evaluate(m, {'outcome': outcome, 'incentive_to_defect': 0.1})
-        assert len(traces) == 1
-        assert traces[0].rule_name == "R1: Gratuitous Betrayal"
+        blamed = [t for t in traces if "broke" in t.facts]
+        assert len(blamed) == 1
+        assert blamed[0].rule_name == "R1: Gratuitous Betrayal"
 
     def test_outcome_rule_profitable_betrayal(self):
         m = TrustModel(Player.RED)
@@ -119,8 +122,9 @@ class TestRuleEngine:
         outcome = CommitmentOutcome(commitment=c, kept=False, broken_by=[Player.BLUE])
         rule = OutcomeRule()
         traces = rule.evaluate(m, {'outcome': outcome, 'incentive_to_defect': 0.8})
-        assert len(traces) == 1
-        assert traces[0].rule_name == "R2: Profitable Betrayal"
+        blamed = [t for t in traces if "broke" in t.facts]
+        assert len(blamed) == 1
+        assert blamed[0].rule_name == "R2: Profitable Betrayal"
 
     def test_gossip_rule_trusted_sender(self):
         m = TrustModel(Player.RED)

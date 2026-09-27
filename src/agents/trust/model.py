@@ -1,7 +1,20 @@
 from typing import Dict, List, Tuple
-from src.common.schemas import Player, CommitmentType, Commitment
-from src.engine.adjudicator import CommitmentOutcome
+from src.common.schemas import Player, CommitmentType, Commitment, CommitmentOutcome
 import numpy as np
+
+# How much of the reputation hit a profitable betrayal is forgiven.
+# w = 1 - lambda * incentive  (slide 6). lambda = 0 makes every break cost the
+# same; lambda = 1 makes a maximally profitable break free.
+LAMBDA_INCENTIVE = 0.6
+MIN_BREAK_WEIGHT = 0.1
+
+
+def break_weight(incentive: float) -> float:
+    """w in "broken: beta + w". A gratuitous betrayal costs a full point of
+    reputation; a lucrative one costs less, because it explains itself."""
+    incentive = min(1.0, max(0.0, incentive))
+    return max(MIN_BREAK_WEIGHT, 1.0 - LAMBDA_INCENTIVE * incentive)
+
 
 class TrustRecord:
     def __init__(self, alpha: float = 1.0, beta: float = 1.0):
@@ -36,24 +49,27 @@ class TrustModel:
         return self.get_record(player, c_type).get_expected_value()
 
     def update_from_outcome(self, outcome: CommitmentOutcome, incentive_to_defect: float = 0.0):
-        # Incentive to defect determines how much we update beta on a break
-        # If incentive is high, it was a "rational" betrayal. We still penalize, but maybe less.
-        # "A profitable betrayal should damage trust less than an inexplicable/gratuitous betrayal."
-        # discount = 1.0 if gratuitous (incentive = 0)
-        # discount = 0.5 if profitable (incentive > 0)
-        
+        """Apply one graded commitment to the Beta records.
+
+        Own record included on purpose: the engine publishes every outcome, so
+        every player scores my record off the same public evidence. That record
+        is the best estimate I have of how much reputation I stand to lose,
+        which is what the planner prices a betrayal against.
+        """
         for p in outcome.commitment.players:
-            if p == self.owner: continue # don't track trust in ourselves this way
-            
-            # If the player broke the commitment
+            record = self.get_record(p, outcome.commitment.commitment_type)
             if p in outcome.broken_by:
-                discount = 0.5 if incentive_to_defect > 0 else 1.0
-                record = self.get_record(p, outcome.commitment.commitment_type)
-                record.update(kept=False, discount=discount)
-                # Explanation logic goes here later
+                record.update(kept=False, discount=break_weight(incentive_to_defect))
             else:
-                record = self.get_record(p, outcome.commitment.commitment_type)
                 record.update(kept=True, discount=1.0)
+
+    def reputation_drop(self, player: Player, c_type: CommitmentType,
+                        incentive: float = 0.0) -> float:
+        """Delta-P: how far belief that *player* keeps this kind of promise
+        falls if they break it now. Beta(a, b) -> Beta(a, b + w)."""
+        r = self.get_record(player, c_type)
+        w = break_weight(incentive)
+        return r.get_expected_value() - r.alpha / (r.alpha + r.beta + w)
                 
     def apply_gossip(self, gossip_sender: Player, accused: Player, c_type: CommitmentType):
         # Forward chaining rule base - Rule R3

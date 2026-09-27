@@ -1,6 +1,6 @@
 from typing import List, Dict, Tuple, Set
-from src.common.schemas import GameState, Order, OrderType, Player, Commitment, CommitmentType, Unit
-from src.engine.board import is_adjacent, is_supply_center
+from src.common.schemas import GameState, Order, OrderType, Player, Commitment, CommitmentType, Unit, CommitmentOutcome
+from src.engine.board import is_adjacent, is_supply_center, get_all_territories
 
 class ResolutionLog:
     def __init__(self):
@@ -8,18 +8,14 @@ class ResolutionLog:
     def add(self, event: str):
         self.events.append(event)
 
-class CommitmentOutcome:
-    def __init__(self, commitment: Commitment, kept: bool, broken_by: List[Player]):
-        self.commitment = commitment
-        self.kept = kept
-        self.broken_by = broken_by
-
 def verify_commitments(state: GameState, commitments: List[Commitment], orders: List[Order]) -> List[CommitmentOutcome]:
     outcomes = []
     
-    # Precompute player territories for ALLIANCE check
+    # What an alliance protects (slide 4): "neither moves into the other's
+    # units or centres". Occupied squares plus owned supply centres — NOT
+    # every territory the player has ever passed through.
     player_territories = {p: set() for p in Player}
-    for t, owner in state.territory_owners.items():
+    for t, owner in state.supply_centers.items():
         if owner:
             player_territories[owner].add(t)
     for u in state.units:
@@ -180,10 +176,6 @@ def resolve(state: GameState, orders: List[Order], commitments: List[Commitment]
                 else:
                     new_units.append(Unit(player=o.player, territory=loc))
 
-    new_owners = dict(state.territory_owners)
-    for u in new_units:
-        new_owners[u.territory] = u.player
-        
     final_units = list(new_units)
     # Builds/Removals in Autumn (Even turns? Or let's just say every turn for simplicity of the 12-turn game, or strictly autumn)
     # The requirement: "units gained or lost each autumn based on centres held."
@@ -220,6 +212,13 @@ def resolve(state: GameState, orders: List[Order], commitments: List[Commitment]
     else:
         # Supply centers only change hands in Autumn
         new_sc = state.supply_centers
+
+    # Occupancy only, and computed last so autumn builds and removals are in
+    # it. Supply-centre ownership is the thing that persists; a vacated
+    # territory reverts to nobody.
+    new_owners = {t: None for t in get_all_territories()}
+    for u in final_units:
+        new_owners[u.territory] = u.player
 
     new_state = GameState(
         turn=state.turn + 1,

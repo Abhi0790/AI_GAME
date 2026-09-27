@@ -141,86 +141,8 @@ async def step_game(game_id: str):
     runner = g["runner"]
     t = g["current_turn"]
 
-    # --- Run a single turn (extracted from runner.run) ---
-    import uuid as _uuid
-    from src.common.schemas import Message, MessageType, CommitmentType
-
-    # Clean expired commitments
-    runner.commitments = [c for c in runner.commitments if c.valid_until_turn >= t]
-
-    # Negotiation
-    new_messages = []
-    for a in runner.agents.values():
-        new_messages.extend(a.propose(runner.state))
-
-    for _ in range(runner.negotiation_rounds):
-        if not new_messages:
-            break
-        replies = []
-        inbox = {p: [] for p in Player}
-        for m in new_messages:
-            if m.receiver:
-                inbox[m.receiver].append(m)
-            else:
-                for p in Player:
-                    if p != m.sender:
-                        inbox[p].append(m)
-        for p, a in runner.agents.items():
-            r = a.reply(runner.state, inbox[p])
-            replies.extend(r)
-            for msg in inbox[p]:
-                if msg.message_type == MessageType.BROADCAST:
-                    a.receive_gossip(msg)
-        from src.agents.negotiation.strategy import message_to_commitment
-        for rep in replies:
-            if rep.message_type == MessageType.ACCEPT:
-                orig = next((m for m in new_messages if m.id == rep.reference_id), None)
-                if orig:
-                    c = message_to_commitment(orig, rep.sender, runner.state.turn)
-                    runner.commitments.append(c)
-        new_messages = replies
-
-    # Orders
-    all_orders = []
-    traces = {}
-    for p, a in runner.agents.items():
-        orders, trace = a.act(runner.state, runner.commitments)
-        all_orders.extend(orders)
-        traces[p] = trace
-
-    # Resolve
-    from src.engine.adjudicator import resolve
-    new_state, outcomes, log = resolve(runner.state, all_orders, runner.commitments)
-
-    # Gossip
-    for o in outcomes:
-        if not o.kept:
-            for victim in o.commitment.players:
-                if victim in o.broken_by:
-                    continue
-                for betrayer in o.broken_by:
-                    gossip_msg = Message(
-                        id=str(_uuid.uuid4()),
-                        sender=victim,
-                        receiver=None,
-                        message_type=MessageType.BROADCAST,
-                        broadcast_kind="BETRAYED",
-                        broadcast_target=betrayer,
-                        commitment_type=o.commitment.commitment_type,
-                    )
-                    for p, a in runner.agents.items():
-                        if p != victim:
-                            a.receive_gossip(gossip_msg)
-
-    # Update beliefs & opponent models
-    for a in runner.agents.values():
-        a.update_beliefs_from_outcomes(new_state, outcomes)
-        if hasattr(a, 'observe_orders'):
-            a.observe_orders(all_orders)
-
-    step_data = (runner.state, all_orders, outcomes, log, traces)
-    runner.history.append(step_data)
-    runner.state = new_state
+    step_data = runner.step()
+    new_state = runner.state
 
     g["current_turn"] = t + 1
     if t >= runner.max_turns:

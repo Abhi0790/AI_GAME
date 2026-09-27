@@ -19,8 +19,8 @@ def test_alliance_commitment():
     state = GameState(
         turn=1, 
         units=[], 
-        supply_centers={}, 
-        territory_owners={"R1": Player.RED, "B1": Player.BLUE}
+        supply_centers={"R1": Player.RED, "B1": Player.BLUE}, 
+        territory_owners={}
     )
     c = Commitment(id="2", commitment_type=CommitmentType.ALLIANCE, players=[Player.RED, Player.BLUE], valid_until_turn=2)
     orders = [

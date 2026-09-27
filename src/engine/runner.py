@@ -5,10 +5,12 @@ from src.common.schemas import (
     GameState, Order, Player, Commitment, Message, MessageType,
     CommitmentType, Unit,
 )
+from src.common.schemas import message_to_commitment, commitment_key
 from src.engine.adjudicator import resolve, verify_commitments
-from src.agents.agent import Agent
-from src.engine.board import get_all_territories, is_supply_center, TERRITORIES
-from src.agents.negotiation.strategy import message_to_commitment
+from src.engine.board import (
+    get_all_territories, get_supply_centers, is_supply_center,
+    HOME_CENTERS, WIN_CENTERS, MAX_TURNS, TERRITORIES,
+)
 
 
 class GameRunner:
@@ -17,153 +19,162 @@ class GameRunner:
         self.commitments: List[Commitment] = []
         self.history = []
         
-        # Initial State
+        # Initial state: two units per player, one on each home centre.
         units = [
-            Unit(player=Player.RED, territory="R1"),
-            Unit(player=Player.RED, territory="R2"),
-            Unit(player=Player.RED, territory="R3"),
-            
-            Unit(player=Player.BLUE, territory="B1"),
-            Unit(player=Player.BLUE, territory="B2"),
-            Unit(player=Player.BLUE, territory="B3"),
-            
-            Unit(player=Player.GREEN, territory="G1"),
-            Unit(player=Player.GREEN, territory="G2"),
-            Unit(player=Player.GREEN, territory="G3"),
-            
-            Unit(player=Player.GOLD, territory="Y1"),
-            Unit(player=Player.GOLD, territory="Y2"),
-            Unit(player=Player.GOLD, territory="Y3"),
+            Unit(player=Player(p), territory=t)
+            for p, homes in HOME_CENTERS.items() for t in homes
         ]
-        
-        supply_centers = {
-            "R1": Player.RED, "B1": Player.BLUE, "G1": Player.GREEN, "Y1": Player.GOLD,
-            "N1": None, "N2": None
-        }
-        
-        territory_owners = {
-            "R1": Player.RED, "R2": Player.RED, "R3": Player.RED,
-            "B1": Player.BLUE, "B2": Player.BLUE, "B3": Player.BLUE,
-            "G1": Player.GREEN, "G2": Player.GREEN, "G3": Player.GREEN,
-            "Y1": Player.GOLD, "Y2": Player.GOLD, "Y3": Player.GOLD,
-            "N1": None, "N2": None
-        }
-        
+
+        supply_centers = {t: None for t in get_supply_centers()}
+        for p, homes in HOME_CENTERS.items():
+            for t in homes:
+                supply_centers[t] = Player(p)
+
+        # Ownership of a plain territory is just occupancy.
+        territory_owners = {t: None for t in get_all_territories()}
+        for u in units:
+            territory_owners[u.territory] = u.player
+
         self.state = GameState(turn=1, units=units, supply_centers=supply_centers, territory_owners=territory_owners)
-        self.max_turns = 12
+        self.max_turns = MAX_TURNS
         self.on_turn_resolved = on_turn_resolved
         self.negotiation_rounds = 3
         
-    def run(self):
-        for t in range(self.state.turn, self.max_turns + 1):
-            print(f"--- Turn {t} ---")
-            
-            # 1. Clean expired commitments
-            self.commitments = [c for c in self.commitments if c.valid_until_turn >= t]
-            
-            # 5. Negotiation
-            new_messages = []
-            for a in self.agents.values():
-                new_messages.extend(a.propose(self.state))
-                
-            for round_idx in range(self.negotiation_rounds):
-                if not new_messages:
-                    break
-                    
-                replies = []
-                # Group by receiver
-                inbox = {p: [] for p in Player}
-                for m in new_messages:
-                    if m.receiver:
-                        inbox[m.receiver].append(m)
-                    else:
-                        # Broadcast
-                        for p in Player:
-                            if p != m.sender: inbox[p].append(m)
-                            
-                for p, a in self.agents.items():
-                    r = a.reply(self.state, inbox[p])
-                    replies.extend(r)
-                    
-                    # Convert accepts to commitments
-                    for msg in inbox[p]:
-                        if msg.message_type == MessageType.BROADCAST:
-                            a.receive_gossip(msg)
-                            
-                for rep in replies:
-                    if rep.message_type == MessageType.ACCEPT:
-                        # Find original proposal
-                        orig = next((m for m in new_messages if m.id == rep.reference_id), None)
-                        if orig:
-                            c = message_to_commitment(orig, rep.sender, self.state.turn)
-                            self.commitments.append(c)
-                            print(f"Commitment created: {c.commitment_type} between {c.players}")
-                            
-                new_messages = replies
-                
-            # 7-10. Agents plan and choose orders
-            all_orders = []
-            traces = {}
+    def step(self, verbose: bool = False):
+        """Run one full turn: negotiate, plan, resolve, gossip, update beliefs.
+
+        Returns the history step (state, orders, outcomes, log, traces).
+        Single source of truth for a turn — the CLI and the web UI both call it.
+        """
+        t = self.state.turn
+        say = print if verbose else (lambda *a, **k: None)
+        say(f"--- Turn {t} ---")
+
+        # 1. Drop expired commitments
+        self.commitments = [c for c in self.commitments if c.valid_until_turn >= t]
+
+        # 2. Negotiation rounds
+        new_messages = []
+        for a in self.agents.values():
+            new_messages.extend(a.propose(self.state))
+
+        for _ in range(self.negotiation_rounds):
+            if not new_messages:
+                break
+
+            inbox = {p: [] for p in Player}
+            for m in new_messages:
+                if m.receiver:
+                    inbox[m.receiver].append(m)
+                else:
+                    for p in Player:
+                        if p != m.sender:
+                            inbox[p].append(m)
+
+            replies = []
             for p, a in self.agents.items():
-                orders, trace = a.act(self.state, self.commitments)
-                all_orders.extend(orders)
-                traces[p] = trace
-                
-            # 11-13. Resolve
-            new_state, outcomes, log = resolve(self.state, all_orders, self.commitments)
-            if self.on_turn_resolved:
-                self.on_turn_resolved(self.state, all_orders, log)
-            
-            # Print outcomes
-            for o in outcomes:
-                if not o.kept:
-                    print(f"Commitment BROKEN by {o.broken_by}: {o.commitment.commitment_type}")
+                replies.extend(a.reply(self.state, inbox[p]))
+                for msg in inbox[p]:
+                    if msg.message_type == MessageType.BROADCAST:
+                        a.receive_gossip(msg)
 
-            # ── Gossip broadcasts ────────────────────────────────────
-            # Agents whose commitments were broken broadcast a BETRAYED
-            # message so the gossip trust rules fire for other players.
-            for o in outcomes:
-                if not o.kept:
-                    # Each non-breaking participant broadcasts
-                    for victim in o.commitment.players:
-                        if victim in o.broken_by:
-                            continue
-                        for betrayer in o.broken_by:
-                            gossip_msg = Message(
-                                id=str(uuid.uuid4()),
-                                sender=victim,
-                                receiver=None,  # broadcast
-                                message_type=MessageType.BROADCAST,
-                                broadcast_kind="BETRAYED",
-                                broadcast_target=betrayer,
-                                commitment_type=o.commitment.commitment_type,
-                            )
-                            # Deliver to all other agents
-                            for p, a in self.agents.items():
-                                if p != victim:
-                                    a.receive_gossip(gossip_msg)
-                            print(f"[GOSSIP] {victim.value} broadcasts: "
-                                  f"{betrayer.value} broke {o.commitment.commitment_type.value}")
-                    
-            # Print resolution log
-            for l in log.events:
-                print(l)
-                
-            # 14. Beliefs update
-            for a in self.agents.values():
-                a.update_beliefs_from_outcomes(new_state, outcomes)
+            for rep in replies:
+                if rep.message_type == MessageType.ACCEPT:
+                    orig = next((m for m in new_messages if m.id == rep.reference_id), None)
+                    if orig:
+                        c = message_to_commitment(orig, rep.sender, self.state.turn)
+                        existing = next(
+                            (e for e in self.commitments
+                             if commitment_key(e) == commitment_key(c)), None)
+                        if existing:
+                            # Same deal proposed again: renew it, do not stack
+                            # a second copy that the planner would price twice.
+                            existing.valid_until_turn = max(
+                                existing.valid_until_turn, c.valid_until_turn)
+                        else:
+                            self.commitments.append(c)
+                            say(f"Commitment created: {c.commitment_type} between {c.players}")
 
-            # Feed orders to opponent models
-            for a in self.agents.values():
-                if hasattr(a, 'observe_orders'):
-                    a.observe_orders(all_orders)
-                
-            self.history.append((self.state, all_orders, outcomes, log, traces))
-            self.state = new_state
-            
-        print("Game Over")
-        # Determine winner
-        centers = {p: 0 for p in Player}
+            new_messages = replies
+
+        # 3. Agents choose orders
+        all_orders = []
+        traces = {}
+        for p, a in self.agents.items():
+            orders, trace = a.act(self.state, self.commitments)
+            all_orders.extend(orders)
+            traces[p] = trace
+
+        # 4. Engine resolves and grades commitments
+        new_state, outcomes, log = resolve(self.state, all_orders, self.commitments)
+        if self.on_turn_resolved:
+            self.on_turn_resolved(self.state, all_orders, log)
+
+        for o in outcomes:
+            if not o.kept:
+                say(f"Commitment BROKEN by {o.broken_by}: {o.commitment.commitment_type}")
+
+        # 5. Victims broadcast BETRAYED so the gossip rules fire elsewhere
+        for o in outcomes:
+            if o.kept:
+                continue
+            for victim in o.commitment.players:
+                if victim in o.broken_by:
+                    continue
+                for betrayer in o.broken_by:
+                    gossip_msg = Message(
+                        id=str(uuid.uuid4()),
+                        sender=victim,
+                        receiver=None,
+                        message_type=MessageType.BROADCAST,
+                        broadcast_kind="BETRAYED",
+                        broadcast_target=betrayer,
+                        commitment_type=o.commitment.commitment_type,
+                    )
+                    for p, a in self.agents.items():
+                        if p != victim:
+                            a.receive_gossip(gossip_msg)
+                    say(f"[GOSSIP] {victim.value} broadcasts: "
+                        f"{betrayer.value} broke {o.commitment.commitment_type.value}")
+
+        for l in log.events:
+            say(l)
+
+        # 6. Beliefs and opponent models update on what the engine published
+        for a in self.agents.values():
+            a.update_beliefs_from_outcomes(self.state, new_state, outcomes)
+            if hasattr(a, 'observe_orders'):
+                a.observe_orders(all_orders)
+
+        step_data = (self.state, all_orders, outcomes, log, traces)
+        self.history.append(step_data)
+        self.state = new_state
+        return step_data
+
+    def center_counts(self):
+        counts = {p: 0 for p in Player}
         for owner in self.state.supply_centers.values():
-            if owner: centers[owner] += 1
-        print("Final Centers:", centers)
+            if owner:
+                counts[owner] += 1
+        return counts
+
+    def winner(self):
+        """Whoever holds WIN_CENTERS centres, else None while the game runs."""
+        counts = self.center_counts()
+        leader = max(counts, key=counts.get)
+        return leader if counts[leader] >= WIN_CENTERS else None
+
+    def run(self):
+        while self.state.turn <= self.max_turns:
+            self.step(verbose=True)
+            champion = self.winner()
+            if champion:
+                print(f"Game Over: {champion.value} reached {WIN_CENTERS} centres "
+                      f"on turn {self.state.turn - 1}")
+                break
+        else:
+            print("Game Over: horizon reached")
+
+        counts = self.center_counts()
+        print("Final Centers:", {p.value: c for p, c in counts.items()})
+        return self.winner() or max(counts, key=counts.get)
