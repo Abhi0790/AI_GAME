@@ -2,7 +2,7 @@ from typing import List, Dict, Tuple, Optional
 
 from src.common.schemas import (
     Player, GameState, Order, OrderType, Commitment, CommitmentType, Message,
-    MessageType, TrustTrace, BeliefSnapshot,
+    MessageType, TrustTrace, BeliefSnapshot, obligated_parties,
 )
 from src.engine.board import players, get_adjacent
 from src.agents.trust.model import TrustModel
@@ -43,12 +43,9 @@ class Agent:
 
         if planner_config is None:
             planner_config = PlannerConfig()
-        planner_config.reputation_cost_coefficient = self.persona.reputation_cost
-        planner_config.vengeance = self.persona.vengeance
         self.planner = Planner(player, planner_config)
         self.negotiation = NegotiationStrategy(player, self.planner)
-        self.negotiation.privacy_preference = self.persona.privacy
-        self.negotiation.bound = self.persona.policy != "none"
+        self.set_persona(persona_name)
         # The planner charges back the unused share of whatever the negotiator
         # signed each deal for, so it needs the prices the negotiator recorded.
         self.planner.negotiation = self.negotiation
@@ -71,6 +68,16 @@ class Agent:
         self._wronged: List[Tuple[Player, Player]] = []    # (victim, betrayer) last turn
         self._wronged_next: List[Tuple[Player, Player]] = []
         self._orders_state: Optional[GameState] = None
+
+    def set_persona(self, persona_name: str, rep_cost_scale: float = 1.0):
+        """Take on a persona's parameters. Beliefs and grudges carry over,
+        so a mid-game call is a change of leadership, not a new player."""
+        self.persona = PERSONAS[persona_name]
+        self.persona_name = persona_name
+        self.planner.config.reputation_cost_coefficient = self.persona.reputation_cost * rep_cost_scale
+        self.planner.config.vengeance = self.persona.vengeance
+        self.negotiation.privacy_preference = self.persona.privacy
+        self.negotiation.bound = self.persona.policy != "none"
 
     # ── social position the planner acts on ─────────────────────────────
     def stance(self) -> Dict[Player, float]:
@@ -186,6 +193,10 @@ class Agent:
             for breaker in o.broken_by:
                 if breaker != self.player:
                     self.infamy[breaker] = self.infamy.get(breaker, 0.0) + 1.0
+            # What anyone who can see the deal learns about resisting temptation.
+            for p in obligated_parties(o.commitment, prev_state.turn):
+                if p != self.player and p in o.tempted:
+                    self.trust_model.tempted_record(p).update(kept=p not in o.broken_by)
             if self.player in o.commitment.players:
                 incentive = max(
                     (self.estimate_incentive(prev_state, new_state, p) for p in o.broken_by),

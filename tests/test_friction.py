@@ -83,3 +83,58 @@ def test_noise_in_a_real_game():
     assert slipped and all(o.order_type != OrderType.HOLD for o in slipped)
     for step in runner.history:
         assert len(step.intended) == len(step.orders)
+
+
+def test_siege_needs_a_unit_there_since_spring():
+    Y = Player.GOLD
+    with use_board(ring_board(sieges=True)):
+        s = _state([Unit(player=Y, territory="C2")]).model_copy(update={"turn": 2})
+        walk_in = [Order(player=Y, unit_territory="C2", order_type=OrderType.MOVE, target="R1")]
+        after, _, _ = resolve(s, walk_in)
+        assert after.supply_centers["R1"] is None
+        sat = _state([Unit(player=Y, territory="R1")]).model_copy(update={"turn": 2})
+        after, _, _ = resolve(sat, [])
+        assert after.supply_centers["R1"] == Y
+    with use_board(ring_board()):
+        after, _, _ = resolve(s, walk_in)
+        assert after.supply_centers["R1"] == Y
+
+
+def test_regime_change_switches_persona_mid_game():
+    seats = GameConfig(seed=2).seats()
+    red = seats[Player.RED]
+    new = "Opportunist" if red != "Opportunist" else "Honest"
+    runner = play(GameConfig(seed=2, max_turns=4, node_budget=300,
+                             regime_change={"seat": "Red", "turn": 3, "persona": new}))
+    agent = runner.agents[Player.RED]
+    assert agent.persona_name == new
+    assert agent.negotiation.bound == (new != "Opportunist")
+    assert any("Change of leadership" in line for line in runner.history[2].log.events)
+    from src.harness import reputation_of
+    carried = reputation_of(runner)
+    assert carried and all(red not in about for about in carried.values())
+
+
+def test_siege_occupation_counts_toward_value():
+    from src.agents.planner.planner import evaluate_state
+    Y = Player.GOLD
+    on, off = _state([Unit(player=Y, territory="R1")]), _state([Unit(player=Y, territory="C2")])
+    with use_board(ring_board(sieges=True)):
+        siege_gap = evaluate_state(on, Y) - evaluate_state(off, Y)
+    with use_board(ring_board()):
+        plain_gap = evaluate_state(on, Y) - evaluate_state(off, Y)
+    assert siege_gap > plain_gap
+
+
+def test_reputation_carries_across_games_unless_erased():
+    from src.harness import build_agents, game_setup, play_series, reputation_of
+    ledger = {"Honest": {"Opportunist": {"Alliance": [9.0, 3.0], "tempted": [1.0, 4.0]}}}
+    for erase, want in ((False, (9.0, 3.0)), (True, (1.0, 1.0))):
+        cfg = GameConfig(seed=0, reputation=ledger, erase_reputation=erase)
+        with game_setup(cfg):
+            agents = {a.persona_name: a for a in build_agents(cfg)}
+        opp = agents["Opportunist"].player
+        rec = agents["Honest"].trust_model.get_record(opp, CommitmentType.ALLIANCE)
+        assert (rec.alpha, rec.beta) == want
+    first, second = play_series([GameConfig(seed=s, max_turns=2, node_budget=150) for s in (4, 5)])
+    assert second.config.reputation == reputation_of(first)

@@ -49,7 +49,7 @@ export default function App() {
   const [config, setConfig] = useState({
     seat: "", chaos: "", seed: "", search: "expectiminimax",
     node_budget: 1500, negotiation_rounds: 3, seating: {},
-    n_seats: 4, homes_per_player: 2, outer_rings: 0, max_turns: 12, win_centers: "", win_fraction: 0.6, home_builds: true, fortified_homes: false, order_noise: 0,
+    n_seats: 4, homes_per_player: 2, outer_rings: 0, max_turns: 12, win_centers: "", win_fraction: 0.6, home_builds: true, fortified_homes: false, sieges: false, erase_reputation: false, order_noise: 0,
   });
   const [error, setError] = useState(null);
   const cancel = useRef(false);
@@ -142,6 +142,8 @@ export default function App() {
         win_fraction: Number(config.win_fraction),
         home_builds: config.home_builds,
         fortified_homes: config.fortified_homes,
+        sieges: config.sieges,
+        erase_reputation: config.erase_reputation,
         knobs: Number(config.order_noise) > 0 ? { ORDER_NOISE: Number(config.order_noise) } : {},
       });
       const g = { ...d, id: d.game_id };
@@ -291,6 +293,12 @@ export default function App() {
           <label htmlFor="fortified_homes" title="Home centres defend at +1, so taking one needs two supports.">forts</label>
           <input id="fortified_homes" type="checkbox" checked={config.fortified_homes}
                  onChange={(e) => setConfig({ ...config, fortified_homes: e.target.checked })} />
+          <label htmlFor="sieges" title="A centre changes hands only if the unit was already on it after spring.">sieges</label>
+          <input id="sieges" type="checkbox" checked={config.sieges}
+                 onChange={(e) => setConfig({ ...config, sieges: e.target.checked })} />
+          <label htmlFor="erase_reputation" title="Start with no memory of earlier games. Unticked, every persona remembers what it learned about the others in the last game.">erase reputation</label>
+          <input id="erase_reputation" type="checkbox" checked={config.erase_reputation}
+                 onChange={(e) => setConfig({ ...config, erase_reputation: e.target.checked })} />
           <label htmlFor="order_noise" title="Chance each order is lost and the unit holds instead. A lost promised order counts as broken.">noise</label>
           <input id="order_noise" type="number" className="sm" min="0" max="1" step="0.05"
                  value={config.order_noise}

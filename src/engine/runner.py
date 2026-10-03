@@ -13,7 +13,7 @@ from src.common.schemas import (
     obligated_parties, mirrors, exchange_leg_due,
 )
 from src.engine import adjudicator
-from src.engine.adjudicator import resolve
+from src.engine.adjudicator import resolve, verify_commitments
 from src.engine.orders import _SETS_CACHE, generate_orders_for_unit
 from src.engine.board import (
     get_all_territories, get_supply_centers, home_centers, win_centers, max_turns,
@@ -403,6 +403,7 @@ class GameRunner:
         # at the front of it below, so the order is the same and the CLI no
         # longer prints every negotiation line twice.
         negotiation_lines: List[str] = []
+        self._regime_change(negotiation_lines)
         messages = self._negotiate(negotiation_lines)
 
         # 3. What every agent predicts about the deals now on the table
@@ -428,6 +429,7 @@ class GameRunner:
 
         # 5. Engine resolves and grades commitments
         new_state, outcomes, log = resolve(self.state, all_orders, self.commitments)
+        self._annotate(outcomes, intended if slipped else None, predictions)
         for line in negotiation_lines:
             log.events.insert(0, line)
         for o in slipped:
@@ -487,6 +489,25 @@ class GameRunner:
         self.nodes_per_turn.append(nodes)
         self.state = new_state
         return record
+
+    def _regime_change(self, log_lines: List[str]):
+        """Swap a seat's persona on the turn GameConfig.regime_change names."""
+        rc = getattr(getattr(self, "config", None), "regime_change", None)
+        if rc and rc["turn"] == self.state.turn:
+            self.agents[Player(rc["seat"])].set_persona(rc["persona"], self.config.rep_cost_scale)
+            log_lines.append(f"Change of leadership: {rc['seat']} is now {rc['persona']}")
+
+    def _annotate(self, outcomes, intended: Optional[List[Order]], predictions):
+        """Mark each outcome's accidental breakers (whose intended orders kept
+        the deal) and the parties its members judged tempted."""
+        if intended is not None:
+            meant = {m.commitment.id: set(m.broken_by)
+                     for m in verify_commitments(self.state, self.commitments, intended)}
+            for o in outcomes:
+                o.accidental = [p for p in o.broken_by if p not in meant[o.commitment.id]]
+        tempted = {(pt.commitment_id, pt.subject) for pt in predictions if pt.incentive > 0}
+        for o in outcomes:
+            o.tempted = [p for p in o.commitment.players if (o.commitment.id, p) in tempted]
 
     def _slip(self, orders: List[Order]):
         """Replace each non-hold order with a hold at rate ORDER_NOISE.

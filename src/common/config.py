@@ -73,6 +73,7 @@ class GameConfig:
     home_builds: bool = True                # False: build on any owned centre
     outer_rings: int = 0                    # rings of neutral centres outside the homes
     fortified_homes: bool = False           # home centres defend at +1
+    sieges: bool = False                    # centres fall only to a unit there since spring
     board: Optional[dict] = None
 
     # ── the agents ──────────────────────────────────────────────────────
@@ -95,6 +96,14 @@ class GameConfig:
     human_seat: Optional[Player] = None
     chaos_seat: Optional[Player] = None
     chaos_mode: Optional[str] = None
+    # Change of leadership: {"seat": "Red", "turn": 5, "persona": "Opportunist"}
+    # switches that seat's persona at the start of that turn.
+    regime_change: Optional[Dict[str, Any]] = None
+    # Reputation carried in from earlier games: observer persona -> subject
+    # persona -> record name -> [alpha, beta] (harness.reputation_of builds it).
+    reputation: Optional[Dict[str, Any]] = None
+    # Start this game with no history even when `reputation` is given.
+    erase_reputation: bool = False
     # UPPERCASE module constants to override for this game, by bare name,
     # e.g. {"LAMBDA_INCENTIVE": 0.6, "CENTRE_VALUE": 1.0}.
     knobs: Dict[str, float] = field(default_factory=dict)
@@ -107,7 +116,8 @@ class GameConfig:
                           max_turns=self.max_turns,
                           home_builds=self.home_builds,
                           outer_rings=self.outer_rings,
-                          fortified_homes=self.fortified_homes)
+                          fortified_homes=self.fortified_homes,
+                          sieges=self.sieges)
 
     def seats(self) -> Dict[Player, str]:
         """Seat -> persona, with the seats taken from the board."""
@@ -170,6 +180,8 @@ def add_board_args(parser: argparse.ArgumentParser) -> None:
                         "(standard Diplomacy, the default)")
     g.add_argument("--fortified-homes", action="store_true",
                    help="home centres defend at +1, so taking one needs two supports")
+    g.add_argument("--sieges", action="store_true",
+                   help="a centre changes hands only if the unit was on it since spring")
 
 
 def board_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
@@ -179,4 +191,5 @@ def board_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
             "max_turns": args.max_turns,
             "home_builds": not args.build_anywhere,
             "outer_rings": args.outer_rings,
-            "fortified_homes": args.fortified_homes}
+            "fortified_homes": args.fortified_homes,
+            "sieges": args.sieges}

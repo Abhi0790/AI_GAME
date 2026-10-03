@@ -29,7 +29,7 @@ from src.common.schemas import (
 )
 from src.agents.negotiation.personas import PERSONAS
 from src.common.config import GameConfig
-from src.harness import build_runner, game_setup, knob_values, read_only
+from src.harness import build_runner, game_setup, knob_values, read_only, reputation_of
 from src.engine.replay import save_replay
 from src.engine.orders import generate_orders_for_unit
 from src.engine.board import (
@@ -312,6 +312,8 @@ class NewGame(BaseModel):
     home_builds: bool = True              # False: build on any owned centre
     outer_rings: int = 0                  # rings of neutral centres outside the homes
     fortified_homes: bool = False         # home centres defend at +1
+    sieges: bool = False                  # centres fall only to a unit there since spring
+    erase_reputation: bool = False        # False: start from the last game's reputation
     seating: Optional[Dict[str, str]] = None   # {"Red": "Honest", ...}
     search: str = "expectiminimax"
     node_budget: int = 1500
@@ -413,6 +415,8 @@ def new_game(cfg: NewGame = NewGame()):
             "seats": [MIN_SEATS, MAX_SEATS],
         })
 
+    if _games and not config.erase_reputation:
+        config.reputation = reputation_of(list(_games.values())[-1]["runner"])
     game_id = str(uuid.uuid4())[:8]
     while len(_games) >= MAX_GAMES:
         _games.pop(next(iter(_games)))

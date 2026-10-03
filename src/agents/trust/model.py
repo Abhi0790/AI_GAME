@@ -56,6 +56,14 @@ BN_TEMPTATION = 0.042
 # offer is rare — most live deals sit near zero. iota at or above the scale
 # counts as maximum temptation.
 BN_INCENTIVE_SCALE = 0.1
+# Prior of the "keeps when tempted" record. Untempted promises are kept by
+# every persona alike (93-97%); what separates them is what they do when
+# breaking pays (Honest 0.90, Opportunist 0.58). One game holds too few
+# tempted outcomes to learn from (~1.4 per opponent per observer), so the
+# record only beats the base rate once reputation carries across games
+# (GameConfig.reputation, harness.play_series). 0 for both turns it off.
+TEMPTED_PRIOR_ALPHA = 4.0
+TEMPTED_PRIOR_BETA = 1.0
 
 # How much pair-specific evidence it takes before "X keeps promises to *me*"
 # outweighs "X keeps promises". Whether Blue honours deals with Red is a
@@ -85,8 +93,13 @@ def break_weight(incentive: float) -> float:
 
 def p_keeps_given(reliability: float, incentive: float,
                   ceiling: Optional[float] = None, bias: Optional[float] = None,
-                  temptation: Optional[float] = None) -> float:
+                  temptation: Optional[float] = None,
+                  tempted_keep: Optional[float] = None) -> float:
     """The Keeps node's CPT.
+
+    With *tempted_keep* (how often this player kept a promise when breaking
+    paid), the discount for temptation is that player's own record rather
+    than one constant for everyone.
 
     Pure function so the sweep and the tests can hit it without a model."""
     ceiling = BN_CEILING if ceiling is None else ceiling
@@ -95,7 +108,8 @@ def p_keeps_given(reliability: float, incentive: float,
 
     r = min(1.0, max(0.0, reliability))
     t = min(1.0, max(0.0, incentive / BN_INCENTIVE_SCALE))
-    return ceiling / (1.0 + math.exp(-(bias + BN_SLOPE * r))) * (1.0 - temptation * t)
+    resist = 1.0 - temptation if tempted_keep is None else tempted_keep
+    return ceiling / (1.0 + math.exp(-(bias + BN_SLOPE * r))) * (1.0 - t * (1.0 - resist))
 
 
 class TrustRecord:
@@ -135,6 +149,42 @@ class TrustModel:
         self.pair_records: Dict[Tuple[Player, Player], Dict[CommitmentType, TrustRecord]] = {}
         self.prior_alpha = prior_alpha
         self.prior_beta = prior_beta
+        # target_player -> keeps-when-tempted, first-hand only, all promise kinds
+        self.tempted: Dict[Player, TrustRecord] = {}
+
+    def tempted_record(self, player: Player) -> TrustRecord:
+        if player not in self.tempted:
+            self.tempted[player] = TrustRecord(TEMPTED_PRIOR_ALPHA, TEMPTED_PRIOR_BETA)
+        return self.tempted[player]
+
+    def tempted_keep(self, player: Player) -> Optional[float]:
+        """How often *player* kept a promise when breaking paid; None when the
+        record is switched off."""
+        if TEMPTED_PRIOR_ALPHA + TEMPTED_PRIOR_BETA <= 0:
+            return None
+        return self.tempted_record(player).get_expected_value()
+
+    def export_reputation(self, personas: Dict[Player, str]) -> Dict[str, Dict[str, List[float]]]:
+        """What I know of each player, keyed by persona so it can follow them
+        into another game where they sit in a different seat."""
+        out: Dict[str, Dict[str, List[float]]] = {}
+        for p, recs in self.records.items():
+            for c_type, r in recs.items():
+                if p in personas:
+                    out.setdefault(personas[p], {})[c_type.value] = [r.alpha, r.beta]
+        for p, r in self.tempted.items():
+            if p in personas:
+                out.setdefault(personas[p], {})["tempted"] = [r.alpha, r.beta]
+        return out
+
+    def import_reputation(self, ledger: Dict[str, Dict[str, List[float]]],
+                          personas: Dict[Player, str]):
+        """Start from what an earlier game ended with."""
+        for p, name in personas.items():
+            for key, (a, b) in ledger.get(name, {}).items():
+                rec = (self.tempted_record(p) if key == "tempted"
+                       else self.get_record(p, CommitmentType(key)))
+                rec.alpha, rec.beta = a, b
 
     def get_record(self, player: Player, c_type: CommitmentType) -> TrustRecord:
         if player not in self.records:
@@ -182,7 +232,8 @@ class TrustModel:
         next to an undefended centre of mine is not a safe bet, and the Beta
         mean on its own cannot say so.
         """
-        return p_keeps_given(self.get_reliability(player, c_type, toward), incentive)
+        return p_keeps_given(self.get_reliability(player, c_type, toward), incentive,
+                             tempted_keep=self.tempted_keep(player))
 
     def observe(self, subject: Player, counterparties, c_type: CommitmentType,
                 kept: bool, discount: float = 1.0):
@@ -230,11 +281,13 @@ class TrustModel:
         # experiment that substitutes a constant *decision* forecast. The
         # ablation should change what the agent expects of a partner, not
         # silently remove the cost of its own betrayal.
-        before = p_keeps_given(self.get_reliability(player, c_type, toward), incentive)
+        tempted = self.tempted_keep(player)
+        before = p_keeps_given(self.get_reliability(player, c_type, toward), incentive,
+                               tempted_keep=tempted)
 
-        def broken_mean(rec: TrustRecord) -> float:
+        def broken_mean(rec: TrustRecord, weight: float = w) -> float:
             a, b = rec.alpha * EVIDENCE_DECAY, rec.beta * EVIDENCE_DECAY
-            return a / (a + b + w)
+            return a / (a + b + weight)
 
         general_after = broken_mean(self.get_record(player, c_type))
         if toward is None or toward == player:
@@ -244,7 +297,11 @@ class TrustModel:
             pw = self._pair_weight(pair)
             after_reliability = pw * broken_mean(pair) + (1.0 - pw) * general_after
 
-        after = p_keeps_given(after_reliability, incentive)
+        # A break while tempted is evidence about exactly that, so the
+        # tempted record falls too, by a full break.
+        if tempted is not None and incentive > 0:
+            tempted = broken_mean(self.tempted_record(player), 1.0)
+        after = p_keeps_given(after_reliability, incentive, tempted_keep=tempted)
         return max(0.0, before - after)
 
     def general_trust(self, player: Player) -> float:

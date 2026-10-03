@@ -4,6 +4,7 @@ constructed.
 The board and the knobs are process-global for the length of a game, so a
 runner must be built and stepped inside `game_setup`.
 """
+import dataclasses
 import multiprocessing
 import os
 import random
@@ -19,7 +20,6 @@ from src.agents import agent as agent_module
 from src.agents.agent import Agent, HumanAgent
 from src.agents.chaos import ChaosAgent
 from src.agents.negotiation import strategy as strategy_module
-from src.agents.negotiation.personas import PERSONAS
 from src.agents.planner import planner as planner_module
 from src.agents.planner.planner import PlannerConfig
 from src.agents.trust import model as trust_model_module, rules as trust_rules_module
@@ -82,8 +82,9 @@ def build_agents(cfg: GameConfig) -> List:
                 a.trust_model = ConstantForecastTrustModel(
                     player, cfg.seat_keep_forecast[player],
                     a.persona.prior_alpha, a.persona.prior_beta)
-            a.planner.config.reputation_cost_coefficient = (
-                PERSONAS[persona].reputation_cost * cfg.rep_cost_scale)
+            a.set_persona(persona, cfg.rep_cost_scale)
+            if cfg.reputation and not cfg.erase_reputation and persona in cfg.reputation:
+                a.trust_model.import_reputation(cfg.reputation[persona], cfg.seats())
             agents.append(a)
     return agents
 
@@ -187,6 +188,31 @@ def _play_one(job):
         return runner
     with game_setup(cfg):
         return reduce(cfg, runner)
+
+
+def reputation_of(runner: GameRunner) -> dict:
+    """Every AI seat's beliefs at the end of a game, keyed by persona, for
+    `GameConfig.reputation`. A seat that changed leadership is still keyed by
+    its starting persona as observer, but nothing is carried about it: its
+    record mixes two personas' behaviour."""
+    personas = runner.config.seats()
+    unchanged = {p: n for p, n in personas.items()
+                 if getattr(runner.agents.get(p), "persona_name", n) == n}
+    return {personas[p]: a.trust_model.export_reputation(unchanged)
+            for p, a in runner.agents.items() if hasattr(a, "trust_model")}
+
+
+def play_series(cfgs: Iterable[GameConfig],
+                reduce: Optional[Callable[[GameConfig, GameRunner], Any]] = None) -> List[Any]:
+    """Games one after another, each starting from the reputation the last
+    ended with, unless its config sets erase_reputation. Serial by nature."""
+    out, reputation = [], None
+    for cfg in cfgs:
+        cfg = dataclasses.replace(cfg, reputation=reputation)
+        runner = play(cfg)
+        reputation = reputation_of(runner)
+        out.append(reduce(cfg, runner) if reduce else runner)
+    return out
 
 
 def play_many(cfgs: Iterable[GameConfig],

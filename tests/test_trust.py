@@ -227,3 +227,16 @@ def test_fitted_cpt_can_still_refuse_a_betrayer():
     constrained = fit_cpt(rows)
     assert not allows_distrust(*unconstrained[:3])
     assert allows_distrust(*constrained[:3])
+
+
+def test_tempted_record_separates_who_breaks_when_it_pays(monkeypatch):
+    from src.agents.trust import model as M
+    monkeypatch.setattr(M, "TEMPTED_PRIOR_ALPHA", 4.0)
+    monkeypatch.setattr(M, "TEMPTED_PRIOR_BETA", 1.0)
+    m = TrustModel(Player.RED)
+    for _ in range(3):
+        m.tempted_record(Player.BLUE).update(kept=False)
+        m.tempted_record(Player.GREEN).update(kept=True)
+    calm = m.p_keeps(Player.BLUE, CommitmentType.SUPPORT, 0.0)
+    assert calm == m.p_keeps(Player.GREEN, CommitmentType.SUPPORT, 0.0)
+    assert m.p_keeps(Player.BLUE, CommitmentType.SUPPORT, 1.0) < m.p_keeps(Player.GREEN, CommitmentType.SUPPORT, 1.0) - 0.3

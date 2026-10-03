@@ -6,7 +6,7 @@ from src.common.schemas import (
 )
 from src.engine.board import (
     is_adjacent, is_supply_center, get_all_territories, players, home_builds, home_centers,
-    fortress_bonus,
+    fortress_bonus, sieges,
 )
 
 class ResolutionLog:
@@ -338,7 +338,9 @@ def resolve(state: GameState, orders: List[Order], commitments: List[Commitment]
     if state.turn % 2 == 0:
         new_sc = dict(state.supply_centers)
         for u in new_units:
-            if is_supply_center(u.territory):
+            sitting = state.get_unit_at(u.territory)
+            if is_supply_center(u.territory) and (
+                    not sieges() or (sitting is not None and sitting.player == u.player)):
                 new_sc[u.territory] = u.player
 
         sc_counts = {p: 0 for p in players()}

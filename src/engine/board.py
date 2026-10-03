@@ -59,6 +59,9 @@ class Board:
     # True: build only on owned, empty home centres (standard Diplomacy).
     # False: build on any owned, empty centre.
     home_builds: bool = True
+    # True: a centre changes hands only if the unit was already on it after
+    # spring, so a defender gets the autumn to answer.
+    sieges: bool = False
     # Squares whose occupant defends at +1, so taking one needs two supports.
     fortresses: List[str] = field(default_factory=list)
     # territory -> (x, y), for the dashboard
@@ -96,6 +99,7 @@ class Board:
             "win_centers": self.win_centers,
             "max_turns": self.max_turns,
             "home_builds": self.home_builds,
+            "sieges": self.sieges,
             "fortresses": list(self.fortresses),
             "positions": {t: list(xy) for t, xy in self.positions.items()},
             "symmetries": [dict(s) for s in self.symmetries],
@@ -220,7 +224,8 @@ def ring_board(seats: int | Sequence[Player] = DEFAULT_SEATS,
                gap_centres: Optional[bool] = None,
                home_builds: bool = True,
                outer_rings: int = 0,
-               fortified_homes: bool = False) -> Board:
+               fortified_homes: bool = False,
+               sieges: bool = False) -> Board:
     """Build a ring map for any seat count.
 
     Home centres form one ring, `homes_per_player` per seat. Each boundary
@@ -344,6 +349,7 @@ def ring_board(seats: int | Sequence[Player] = DEFAULT_SEATS,
                               homes_per_player + 1)),
         max_turns=max_turns,
         home_builds=home_builds,
+        sieges=sieges,
         fortresses=list(ring) if fortified_homes else [],
         positions=positions,
         symmetries=symmetries,
@@ -400,6 +406,10 @@ def max_turns() -> int:
 
 def home_builds() -> bool:
     return _ACTIVE.home_builds
+
+
+def sieges() -> bool:
+    return _ACTIVE.sieges
 
 
 def adjacency() -> Dict[str, List[str]]:

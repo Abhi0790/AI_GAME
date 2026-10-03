@@ -6,7 +6,7 @@ from src.common.schemas import (
 from src.engine.adjudicator import resolve, verify_commitments
 from src.engine.orders import generate_all_order_sets, generate_orders_for_unit
 from src.engine.board import (
-    is_supply_center, get_adjacent, max_turns, players, win_centers, home_centers,
+    is_supply_center, get_adjacent, max_turns, players, win_centers, home_centers, sieges,
 )
 from src.agents.trust.model import TrustModel, break_weight
 import math
@@ -57,6 +57,9 @@ MOBILITY_VALUE = 0.01
 # Reaching win_centers ends the game: worth this much to the winner and costs
 # each other player the same.
 GAME_END_VALUE = 2.0
+# Under sieges, a unit on a centre it does not own yet counts this share of
+# one. A capture there takes up to three turns, past the search horizon.
+SIEGE_CREDIT = 0.5
 # A player this many centres or fewer from winning is treated as about to win:
 # no deals with them, and breaking one to stop them is not charged as a betrayal.
 NEAR_WIN_MARGIN = 1
@@ -98,6 +101,10 @@ def evaluate_state(state: GameState, player: Player) -> float:
         if is_supply_center(adj) and state.supply_centers.get(adj) != player
     }
     score += len(threatening) * THREATENS_VALUE
+    if sieges():
+        score += SIEGE_CREDIT * CENTRE_VALUE * sum(
+            1 for t in my_squares
+            if is_supply_center(t) and state.supply_centers.get(t) != player)
 
     # 3. Our centres under threat: an enemy unit is one move away.
     enemy_reach = {

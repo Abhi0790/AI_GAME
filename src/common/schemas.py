@@ -152,10 +152,15 @@ class BeliefSnapshot(BaseModel):
 
 class CommitmentOutcome:
     """Engine's verdict on one commitment after a turn's orders."""
-    def __init__(self, commitment: Commitment, kept: bool, broken_by: List[Player]):
+    def __init__(self, commitment: Commitment, kept: bool, broken_by: List[Player],
+                 accidental: Optional[List[Player]] = None):
         self.commitment = commitment
         self.kept = kept
         self.broken_by = broken_by
+        # Breakers whose intended orders kept the deal: a lost order broke it.
+        self.accidental = accidental or []
+        # Obligated parties some member judged tempted to break, before orders.
+        self.tempted: List[Player] = []
 
 class DecisionTrace:
     """Planner's one-sentence account of why an order set was chosen."""

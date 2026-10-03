@@ -177,7 +177,27 @@ python scripts/play.py --seat Purple --seats 6
 +1, so taking one needs two supports instead of one. `--knob ORDER_NOISE=0.1`
 (the dashboard's "noise") loses each order with that probability and holds the
 unit instead; promises are graded on what was executed, so a lost support reads
-as a broken one. `TurnRecord.intended` and `.slipped` keep what was meant.
+as a broken one. `TurnRecord.intended` and `.slipped` keep what was meant, and
+each outcome's `accidental` lists the breakers whose intended orders kept it.
+
+`--sieges` makes a centre change hands only if the unit was already on it after
+spring, so a defender has the autumn to answer; the planner then credits an
+occupation in progress at `SIEGE_CREDIT` of a centre, because the capture lies
+past its search horizon. `GameConfig(regime_change={"seat": "Red", "turn": 5,
+"persona": "Opportunist"})` switches a seat's persona mid-game, keeping its
+beliefs and grudges: a change of leadership the others are not told about.
+
+Reputation can carry from one game to the next. `harness.play_series(cfgs)`
+plays games in order, each starting from what every persona learned about the
+others in the last one, keyed by persona since seats rotate;
+`GameConfig(erase_reputation=True)` starts a game with no history. The
+dashboard carries the most recent game's reputation into a new one unless
+"erase reputation" is ticked. What carries is the trust record per promise
+type and a "keeps when tempted" record, which is what separates personas:
+everyone keeps 93-97% of promises that cost nothing, but when breaking pays
+Honest keeps 0.90 and the Opportunist 0.58. Within one game there is too
+little of that evidence to learn from; carried across games, predictions
+beat the base rate from the second game on.
 
 For a map that is not a ring, pass `GameConfig(board=...)` an explicit
 `Board.to_dict()` — see `tests/test_board_config.py`.
