@@ -135,6 +135,15 @@ def _serialise_commitment(c, turn=None):
 
 def _serialise_history_step(step, viewer=None):
     hidden = _hidden_from(viewer)
+    # Engine logs are free-form text, so they cannot be filtered by deal id.
+    # Seated players get the tactical log; public negotiations are represented
+    # by the filtered messages, commitments and outcomes below.
+    log = step.log.events if viewer is None else [
+        line for line in step.log.events
+        if not line.startswith(("Commitment created:", "Deal dropped:",
+                                "Proposal rejected by the engine:",
+                                "Pact dissolved:"))
+    ]
     return {
         "state": _serialise_state(step.state),
         "orders": [
@@ -154,9 +163,9 @@ def _serialise_history_step(step, viewer=None):
                 "kept": o.kept,
                 "broken_by": [p.value for p in o.broken_by],
             }
-            for o in step.outcomes
+            for o in step.outcomes if not hidden(o.commitment)
         ],
-        "log": step.log.events,
+        "log": log,
         "messages": [_serialise_message(m) for m in step.messages
                      if not hidden(m)],
         "commitments": [_serialise_commitment(c, step.state.turn)
@@ -178,7 +187,7 @@ def _serialise_history_step(step, viewer=None):
                     None if b.reliability_toward_observer is None
                     else round(b.reliability_toward_observer, 3)),
             }
-            for b in step.beliefs
+            for b in step.beliefs if viewer is None or b.observer == viewer
         ],
         "traces": {
             p.value: {
@@ -212,7 +221,7 @@ def _serialise_history_step(step, viewer=None):
                     for o in (t.candidate_orders or [])
                 ],
             } if t else None
-            for p, t in step.traces.items()
+            for p, t in step.traces.items() if viewer is None or p == viewer
         },
     }
 
@@ -220,6 +229,7 @@ def _serialise_history_step(step, viewer=None):
 def _game_summary(g) -> dict:
     runner = g["runner"]
     counts = {p.value: c for p, c in runner.center_counts().items()}
+    private_view = g["human_seat"] is not None and not g["finished"]
     return {
         "state": _serialise_state(runner.state),
         "scores": counts,
@@ -240,12 +250,14 @@ def _game_summary(g) -> dict:
         "knobs": {**knob_values(), **g["config"].knobs},
         "personas": {p.value: getattr(a, "persona_name", "?")
                      for p, a in runner.agents.items()},
-        "brier": brier_score(runner.calibration),
-        "reliability": reliability_bins(runner.calibration, bins=5),
+        # These aggregate every seat's deal outcomes, including private ones.
+        # Publish them after a seated game finishes.
+        "brier": None if private_view else brier_score(runner.calibration),
+        "reliability": [] if private_view else reliability_bins(runner.calibration, bins=5),
         # The negotiator and the planner price the same deal minutes apart in
         # the same turn, against different models of the partner. This is how
         # often they disagreed.
-        "reversals": preference_reversals(
+        "reversals": {} if private_view else preference_reversals(
             runner.reversals,
             {p: getattr(a, "persona_name", "?") for p, a in runner.agents.items()}),
     }
@@ -298,6 +310,8 @@ class NewGame(BaseModel):
     win_fraction: float = DEFAULT_WIN_FRACTION
     max_turns: int = DEFAULT_MAX_TURNS
     home_builds: bool = True              # False: build on any owned centre
+    outer_rings: int = 0                  # rings of neutral centres outside the homes
+    fortified_homes: bool = False         # home centres defend at +1
     seating: Optional[Dict[str, str]] = None   # {"Red": "Honest", ...}
     search: str = "expectiminimax"
     node_budget: int = 1500
@@ -599,6 +613,9 @@ def inspect(game_id: str, player: str, turn: Optional[int] = None):
     if seat not in g["runner"].agents:
         return JSONResponse(status_code=404,
                             content={"error": f"{player} is not seated in this game"})
+    if g["human_seat"] is not None and not g["finished"] and seat != g["human_seat"]:
+        return JSONResponse(status_code=403,
+                            content={"error": "other seats' decisions are private during play"})
 
     with _playing(g), read_only():
         return _inspect(g, seat, turn)
@@ -754,6 +771,9 @@ async def save(game_id: str):
     g = _get(game_id)
     if g is None:
         return JSONResponse(status_code=404, content={"error": "Game not found"})
+    if g["human_seat"] is not None and not g["finished"]:
+        return JSONResponse(status_code=409, content={
+            "error": "full replay is available after a human game finishes"})
     runner = g["runner"]
     path = save_replay(runner.history, runner.state, board=g["board"].to_dict())
     return {"path": path}

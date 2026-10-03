@@ -6,6 +6,7 @@ from src.common.schemas import (
 )
 from src.engine.board import (
     is_adjacent, is_supply_center, get_all_territories, players, home_builds, home_centers,
+    fortress_bonus,
 )
 
 class ResolutionLog:
@@ -285,10 +286,11 @@ def _settle(valid_orders, moves, attackers_of, cut, log_sink=None):
                 succeeds[loc] = False
                 reasons[loc] = f"Bounce: {loc} cannot dislodge friendly {target}"
                 changed = True
-            elif attack(loc, occupant.player) <= defence.get(target, 1):
+            elif attack(loc, occupant.player) <= defence.get(target, 1) + fortress_bonus(target):
                 succeeds[loc] = False
                 reasons[loc] = (f"Bounce: {loc} -> {target} "
-                                f"(attack {attack(loc, occupant.player)} <= defence {defence.get(target, 1)})")
+                                f"(attack {attack(loc, occupant.player)} <= defence "
+                                f"{defence.get(target, 1) + fortress_bonus(target)})")
                 changed = True
 
     dislodged: Set[str] = set()

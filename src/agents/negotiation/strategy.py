@@ -588,6 +588,7 @@ class NegotiationStrategy:
             receiver=msg.sender,
             message_type=kind,
             reference_id=msg.id,
+            private=msg.private,
             rationale=why,
         )
 

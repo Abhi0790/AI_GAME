@@ -648,3 +648,29 @@ def test_mirror_support_deals_are_recognised():
     blue_for_green = leg(Player.BLUE, Player.GREEN, "G1")
     assert mirrors(blue_for_green, leg(Player.GREEN, Player.BLUE, "B2"))
     assert not mirrors(blue_for_green, leg(Player.BLUE, Player.GREEN, "G1"))
+
+
+def test_deal_that_cannot_be_kept_is_not_signed():
+    """A support promise no unit of the supporter can reach would force a
+    break next turn, so the runner refuses to sign it, without freezing out
+    later deals once such a promise is already on the books."""
+    from src.common.config import GameConfig
+    from src.common.schemas import Commitment, CommitmentType, Player
+    from src.engine.board import get_adjacent
+    from src.harness import build_runner
+    runner = build_runner(GameConfig(seed=0))
+    st = runner.state
+    blue = {u.territory for u in st.units if u.player == Player.BLUE}
+    reach = blue | {a for t in blue for a in get_adjacent(t)}
+    green = next(u.territory for u in st.units if u.player == Player.GREEN)
+    far = next(t for t in get_adjacent(green) if t not in reach)
+    unkeepable = Commitment(id="x", commitment_type=CommitmentType.SUPPORT,
+                            players=[Player.BLUE, Player.GREEN], created_turn=1,
+                            valid_until_turn=2, target_territory=far,
+                            supported_from=green)
+    assert not runner._keepable(Player.BLUE, unkeepable)
+    runner.commitments.append(unkeepable)
+    alliance = Commitment(id="y", commitment_type=CommitmentType.ALLIANCE,
+                          players=[Player.BLUE, Player.RED], created_turn=1,
+                          valid_until_turn=2)
+    assert runner._keepable(Player.BLUE, alliance)

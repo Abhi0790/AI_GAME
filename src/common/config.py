@@ -71,6 +71,8 @@ class GameConfig:
     win_fraction: float = DEFAULT_WIN_FRACTION
     max_turns: int = DEFAULT_MAX_TURNS
     home_builds: bool = True                # False: build on any owned centre
+    outer_rings: int = 0                    # rings of neutral centres outside the homes
+    fortified_homes: bool = False           # home centres defend at +1
     board: Optional[dict] = None
 
     # ── the agents ──────────────────────────────────────────────────────
@@ -82,6 +84,11 @@ class GameConfig:
     # Per-seat PlannerConfig overrides, e.g. {Player.RED: {"search": "mcts"}}.
     # The figures put one seat on a variant and measure its win rate.
     seat_planner: Dict[Player, Dict[str, Any]] = field(default_factory=dict)
+    # Research ablation: replace one AI seat's P(keeps) with a fixed forecast.
+    # Evidence updates and reputation penalties continue normally.
+    seat_keep_forecast: Dict[Player, float] = field(default_factory=dict)
+    # Research runs can isolate stochastic draws by turn, stage, and seat.
+    event_keyed_rng: bool = False
     negotiation_rounds: int = 3
     # Multiplies every persona's reputation_cost; the sweep's third axis.
     rep_cost_scale: float = 1.0
@@ -98,7 +105,9 @@ class GameConfig:
         return ring_board(self.n_seats, self.homes_per_player,
                           win_centers=self.win_centers, win_fraction=self.win_fraction,
                           max_turns=self.max_turns,
-                          home_builds=self.home_builds)
+                          home_builds=self.home_builds,
+                          outer_rings=self.outer_rings,
+                          fortified_homes=self.fortified_homes)
 
     def seats(self) -> Dict[Player, str]:
         """Seat -> persona, with the seats taken from the board."""
@@ -115,6 +124,7 @@ class GameConfig:
         d = asdict(self)
         d["seating"] = {p.value: n for p, n in self.seats().items()}
         d["seat_planner"] = {p.value: o for p, o in self.seat_planner.items()}
+        d["seat_keep_forecast"] = {p.value: v for p, v in self.seat_keep_forecast.items()}
         for k in ("human_seat", "chaos_seat"):
             d[k] = d[k].value if d[k] else None
         return d
@@ -126,6 +136,9 @@ class GameConfig:
             d["seating"] = {Player(k): v for k, v in d["seating"].items()}
         if d.get("seat_planner"):
             d["seat_planner"] = {Player(k): v for k, v in d["seat_planner"].items()}
+        if d.get("seat_keep_forecast"):
+            d["seat_keep_forecast"] = {
+                Player(k): v for k, v in d["seat_keep_forecast"].items()}
         for k in ("human_seat", "chaos_seat"):
             if d.get(k):
                 d[k] = Player(d[k])
@@ -149,9 +162,14 @@ def add_board_args(parser: argparse.ArgumentParser) -> None:
                         f"given (default {DEFAULT_WIN_FRACTION})")
     g.add_argument("--max-turns", type=int, default=DEFAULT_MAX_TURNS,
                    help=f"turn limit (default {DEFAULT_MAX_TURNS})")
+    g.add_argument("--outer-rings", type=int, default=0,
+                   help="rings of neutral supply centres outside the home ring, "
+                        "one centre per home centre each (default 0)")
     g.add_argument("--build-anywhere", action="store_true",
                    help="build on any owned centre instead of only on home centres "
                         "(standard Diplomacy, the default)")
+    g.add_argument("--fortified-homes", action="store_true",
+                   help="home centres defend at +1, so taking one needs two supports")
 
 
 def board_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
@@ -159,4 +177,6 @@ def board_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
     return {"n_seats": args.seats, "homes_per_player": args.homes,
             "win_centers": args.win_centers, "win_fraction": args.win_fraction,
             "max_turns": args.max_turns,
-            "home_builds": not args.build_anywhere}
+            "home_builds": not args.build_anywhere,
+            "outer_rings": args.outer_rings,
+            "fortified_homes": args.fortified_homes}

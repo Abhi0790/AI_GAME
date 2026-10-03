@@ -23,6 +23,7 @@ from src.agents.negotiation.personas import PERSONAS
 from src.agents.planner import planner as planner_module
 from src.agents.planner.planner import PlannerConfig
 from src.agents.trust import model as trust_model_module, rules as trust_rules_module
+from src.agents.trust.model import ConstantForecastTrustModel
 from src.engine.board import use_board
 from src.engine import runner as runner_module
 from src.engine.runner import GameRunner
@@ -63,6 +64,11 @@ def apply_knobs(knobs: Dict[str, float]) -> Iterator[None]:
 
 def build_agents(cfg: GameConfig) -> List:
     agents = []
+    unavailable = set(cfg.seat_keep_forecast) - (
+        set(cfg.seats()) - {cfg.human_seat, cfg.chaos_seat})
+    if unavailable:
+        raise ValueError("constant keep forecasts require an AI seat: "
+                         + ", ".join(sorted(p.value for p in unavailable)))
     for player, persona in cfg.seats().items():
         if player == cfg.human_seat:
             agents.append(HumanAgent(player, persona))
@@ -72,6 +78,10 @@ def build_agents(cfg: GameConfig) -> List:
             kw = {"search": cfg.search, "node_budget": cfg.node_budget, "depth": cfg.depth,
                   **cfg.seat_planner.get(player, {})}
             a = Agent(player, persona, PlannerConfig(**kw))
+            if player in cfg.seat_keep_forecast:
+                a.trust_model = ConstantForecastTrustModel(
+                    player, cfg.seat_keep_forecast[player],
+                    a.persona.prior_alpha, a.persona.prior_beta)
             a.planner.config.reputation_cost_coefficient = (
                 PERSONAS[persona].reputation_cost * cfg.rep_cost_scale)
             agents.append(a)

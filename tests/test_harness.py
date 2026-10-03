@@ -1,5 +1,7 @@
 """The harness is the one way a game gets built, so it must be reproducible
 and its knob overrides must not leak."""
+import pytest
+
 from src.common.config import GameConfig, seating_for
 from src.common.schemas import Player
 from src.harness import apply_knobs, knob_values, play
@@ -41,6 +43,16 @@ def test_every_adjudication_is_charged_to_a_seat():
     for step in runner.history:
         for p, n in step.nodes.items():
             assert n <= step.total_nodes[p]
+            assert n <= runner.config.node_budget
+
+
+@pytest.mark.parametrize("search", ["expectiminimax", "mcts"])
+def test_both_searches_respect_a_small_budget(search):
+    budget = 60
+    runner = play(GameConfig(seed=6, max_turns=2,
+                             node_budget=budget, search=search))
+    assert runner.history
+    assert all(n <= budget for step in runner.history for n in step.nodes.values())
 
 
 def test_seating_varies_who_sits_opposite_whom():

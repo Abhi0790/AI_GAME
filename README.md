@@ -7,8 +7,8 @@ cost of breaking one. Betrayal is not scripted.
 
 Deals can be struck privately, bind three players at once, or trade a favour
 now for a repayment later. Trust is tracked both as a public reputation and
-per relationship. Accusations can be false, and the engine can only settle
-the ones about deals it was told about publicly.
+per relationship: a public deal's verdict moves everyone's view of the
+players in it, a private deal's only the view of the players who signed it.
 
 ## Docker
 
@@ -54,11 +54,24 @@ python scripts/demo.py                       # betrayal demo, arithmetic printed
 python scripts/run_headless.py --seed 42     # one game, no UI
 python scripts/play.py --seat Red            # play a seat in the terminal
 python scripts/run_analysis.py --games 20    # metrics per persona, with CIs
+python scripts/run_calibration.py --games 20 # held-out-policy trust calibration
+python scripts/run_trust_ablation.py --games 24 --train-games 24 # paired trust forecast experiment
+python scripts/run_keep_coverage.py --games 96 --budget 400 # keeping-candidate experiment
 python scripts/run_tournament.py --games 20  # multi-game tournament
 python scripts/make_figures.py --games 20    # report figures -> figures/
 python scripts/run_sweep.py --seeds 20       # sweep the knobs -> data/sweep.json
 pytest tests/ -q
 ```
+
+The trust ablation fits a constant keep forecast on separate training games,
+then compares it with the learned forecast in paired test games. It writes a
+summary JSON and a compressed per-offer log beside it. Research runs key
+random draws by turn, stage, and seat so earlier decisions do not shift every
+later planner sample.
+
+The keeping-candidate experiment records whether a legal promise-keeping order
+was generated, survived pruning, and was scored. Its reservation option is
+experimental and is disabled in ordinary games.
 
 Every run is built from one `GameConfig` (`src/common/config.py`) and played
 through `harness.play()`, so a result can be reproduced from the config the
@@ -151,10 +164,20 @@ default) and `--max-turns`, and
 the dashboard has the same controls; the map is generated to match and is proved
 symmetric before it is played on. The default is exactly the board above.
 
+`--outer-rings N` (0–5, the dashboard's "outer rings") adds N rings of neutral
+supply centres outside the home ring, one per home centre each, for a larger
+map with more to fight over: 4 seats and 2 rings is 26 centres instead of 10.
+
 ```bash
-python scripts/run_headless.py --seats 6 --max-turns 20
+python scripts/run_headless.py --seats 6 --outer-rings 2 --max-turns 20
 python scripts/play.py --seat Purple --seats 6
 ```
+
+`--fortified-homes` (the dashboard's "forts") makes every home centre defend at
++1, so taking one needs two supports instead of one. `--knob ORDER_NOISE=0.1`
+(the dashboard's "noise") loses each order with that probability and holds the
+unit instead; promises are graded on what was executed, so a lost support reads
+as a broken one. `TurnRecord.intended` and `.slipped` keep what was meant.
 
 For a map that is not a ring, pass `GameConfig(board=...)` an explicit
 `Board.to_dict()` — see `tests/test_board_config.py`.

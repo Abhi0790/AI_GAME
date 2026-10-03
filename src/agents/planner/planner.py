@@ -1,10 +1,10 @@
 from typing import List, Dict, Tuple, Optional
 from src.common.schemas import (
-    GameState, Order, OrderType, Player, Commitment, DecisionTrace,
-    commitment_key,
+    GameState, Order, OrderType, Player, Commitment, CommitmentType, DecisionTrace,
+    commitment_key, exchange_leg_due, obligated_parties,
 )
 from src.engine.adjudicator import resolve, verify_commitments
-from src.engine.orders import generate_all_order_sets
+from src.engine.orders import generate_all_order_sets, generate_orders_for_unit
 from src.engine.board import (
     is_supply_center, get_adjacent, max_turns, players, win_centers, home_centers,
 )
@@ -26,7 +26,9 @@ class PlannerConfig:
                  depth2_candidates: int = 4, depth2_samples: int = 6,
                  depth2_replies: int = 6, node_budget: int = 1500,
                  vengeance: float = 0.0, search: str = "expectiminimax",
-                 retaliation_samples: int = 1):
+                 retaliation_samples: int = 1,
+                 trace_coverage: bool = False,
+                 reserve_keep_candidate: bool = False):
         self.reputation_cost_coefficient = reputation_cost_coefficient
         self.depth = depth                    # 1 = one ply, 2 = my move, their reply
         self.opponent_samples = opponent_samples
@@ -41,6 +43,8 @@ class PlannerConfig:
         # me. 0 restores the old search, where defecting had no consequence
         # inside the tree at all.
         self.retaliation_samples = retaliation_samples
+        self.trace_coverage = trace_coverage
+        self.reserve_keep_candidate = reserve_keep_candidate
 
 
 # Everything below is denominated in centres: one supply centre = 1.0, so the
@@ -298,6 +302,55 @@ def breaks_commitment(state: GameState, player: Player, my_orders: List[Order],
     )
 
 
+def keeping_order_set(state: GameState, player: Player,
+                      commitments: List[Commitment]) -> Optional[List[Order]]:
+    """Construct a legal order set that keeps all obligations due this turn."""
+    units = [u for u in state.units if u.player == player]
+    holds = {u.territory: Order(player=player, unit_territory=u.territory,
+                                order_type=OrderType.HOLD) for u in units}
+    baseline = list(holds.values())
+    if not breaks_commitment(state, player, baseline, commitments):
+        return baseline
+
+    required = set()
+    for c in commitments:
+        if player not in obligated_parties(c, state.turn):
+            continue
+        if c.commitment_type == CommitmentType.SUPPORT or (
+            c.commitment_type == CommitmentType.EXCHANGE
+            and exchange_leg_due(c, state.turn) == "give"
+        ):
+            required.add((c.supported_from, c.target_territory))
+    if len(required) > len(units):
+        return None
+
+    options = {
+        need: [order for u in units for order in generate_orders_for_unit(state, u)
+               if order.order_type == OrderType.SUPPORT
+               and (order.supported_from, order.target) == need]
+        for need in required
+    }
+    if any(not choices for choices in options.values()):
+        return None
+    needs = sorted(required, key=lambda need: (len(options[need]), str(need)))
+
+    def assign(index: int, chosen: dict) -> Optional[List[Order]]:
+        if index == len(needs):
+            orders = [chosen.get(u.territory, holds[u.territory]) for u in units]
+            return orders if not breaks_commitment(state, player, orders, commitments) else None
+        for order in options[needs[index]]:
+            if order.unit_territory in chosen:
+                continue
+            chosen[order.unit_territory] = order
+            result = assign(index + 1, chosen)
+            if result is not None:
+                return result
+            del chosen[order.unit_territory]
+        return None
+
+    return assign(0, {})
+
+
 def hostile_world(state: GameState, me: Player) -> List[Order]:
     """A reference world: every opponent unit that can step onto something of
     mine does. Used only for pruning, never for scoring a decision."""
@@ -371,17 +424,19 @@ class Planner:
 
     def _opponent_incentives(self, state: GameState, commitments: List[Commitment]
                              ) -> Dict[Player, float]:
-        """iota for every opponent with a live deal, once per decision.
-
-        ponytail: reused for the hypothetical states deeper in the search;
-        recompute per state if depth-2 predictions need it.
-        """
-        # Counted against this decision's budget: it is work done for the decision.
+        """iota for each opponent with a deal, within this decision's budget."""
+        opponents = sorted({q for c in commitments for q in c.players
+                            if q != self.player}, key=lambda q: q.value)
+        # Leave at least a quarter of the budget for evaluating actual moves.
+        reserve = max(1, self.config.node_budget // 4)
+        available = max(0, self.config.node_budget - self.nodes - reserve)
+        samples = min(60, available // max(1, len(opponents)))
+        if samples < 2:
+            return {p: 0.0 for p in opponents}
         count = lambda s, orders: self._resolve(s, orders, [])
-        return {p: defection_incentive(state, p, commitments, resolver=count)
-                for p in sorted({q for c in commitments for q in c.players},
-                                key=lambda q: q.value)
-                if p != self.player}
+        return {p: defection_incentive(state, p, commitments,
+                                      samples=samples, resolver=count)
+                for p in opponents}
 
     def set_opponent_model(self, model):
         """Attach an OpponentModel for informed sampling."""
@@ -440,7 +495,8 @@ class Planner:
 
     # ── dominance pruning ───────────────────────────────────────────────
     def prune(self, state: GameState, candidates: List[List[Order]],
-              commitments: List[Commitment]) -> Tuple[List[List[Order]], int]:
+              commitments: List[Commitment],
+              max_candidates: Optional[int] = None) -> Tuple[List[List[Order]], int]:
         """Drop order sets no rational player would pick, then beam.
 
         Each candidate is scored in two reference worlds — opponents all hold,
@@ -452,6 +508,21 @@ class Planner:
 
         Replaces `random.sample(49)`, which could discard the best move.
         """
+        original_count = len(candidates)
+        if max_candidates is not None and len(candidates) > max_candidates:
+            # Sample both promise keeping and breaking sets when available.
+            # In particular, an obligatory support should not lose its only
+            # legal order just because the product enumeration lists it late.
+            loyal = [c for c in candidates
+                     if not breaks_commitment(state, self.player, c, commitments)]
+            breaking = [c for c in candidates
+                        if breaks_commitment(state, self.player, c, commitments)]
+            selected = [pool[0] for pool in (loyal, breaking) if pool]
+            selected = selected[:max_candidates]
+            remaining = [c for c in candidates if c not in selected]
+            slots = max_candidates - len(selected)
+            candidates = selected + random.sample(remaining, slots)
+
         quiet: List[Order] = []
         hostile = hostile_world(state, self.player)
 
@@ -476,7 +547,42 @@ class Planner:
 
         if not kept:
             kept = candidates[:self.config.beam_width]
-        return kept, len(candidates) - len(kept)
+        return kept, original_count - len(kept)
+
+    def _prepare_candidates(self, state: GameState,
+                            commitments: List[Commitment]):
+        """Sample, prune, and optionally reserve one feasible keeping line."""
+        all_sets = generate_all_order_sets(state, self.player)
+        coverage = {}
+        keep_set = None
+        if self.config.trace_coverage or self.config.reserve_keep_candidate:
+            due = [c for c in commitments
+                   if self.player in obligated_parties(c, state.turn)]
+            if due:
+                keep_set = keeping_order_set(state, self.player, commitments)
+                generated_keep = any(not breaks_commitment(
+                    state, self.player, orders, commitments) for orders in all_sets)
+                coverage = {
+                    "due_obligations": len(due),
+                    "keepable": keep_set is not None,
+                    "generated_keep": generated_keep,
+                }
+                if (self.config.reserve_keep_candidate and keep_set is not None
+                        and not generated_keep):
+                    all_sets = all_sets + [keep_set]
+
+        candidates, pruned = self.prune(
+            state, all_sets, commitments,
+            max_candidates=max(1, self.config.node_budget // 4))
+        if coverage:
+            loyal = next((orders for orders in candidates if not breaks_commitment(
+                state, self.player, orders, commitments)), None)
+            coverage["pruned_keep"] = loyal is not None
+            if self.config.reserve_keep_candidate and loyal is not None:
+                # Pruning sorts by raw position value. At low budgets that can
+                # put every loyal option after the search runs out of nodes.
+                candidates = [loyal] + [orders for orders in candidates if orders != loyal]
+        return candidates, pruned, coverage
 
     # ── vengeance ───────────────────────────────────────────────────────
     def _stance_bonus(self, before: GameState, after: GameState,
@@ -587,12 +693,13 @@ class Planner:
 
         hold_set = [Order(player=self.player, unit_territory=u.territory, order_type=OrderType.HOLD)
                     for u in state.units if u.player == self.player]
+        if self.config.node_budget < 4:
+            return hold_set, DecisionTrace(hold_set, 0, 0, "Search budget too small")
 
         if self.config.search == "mcts":
             return self.mcts_best_orders(state, commitments, trust_model, stance)
 
-        all_sets = generate_all_order_sets(state, self.player)
-        my_order_sets, pruned = self.prune(state, all_sets, commitments)
+        my_order_sets, pruned, coverage = self._prepare_candidates(state, commitments)
 
         self._incentives = self._opponent_incentives(state, commitments)
         worlds = sample_opponent_orders(
@@ -606,9 +713,7 @@ class Planner:
         for my_set in my_order_sets:
             ev_total, veng_total, n = 0.0, 0.0, 0
             for opp_set in worlds:
-                # Every candidate sees at least one world, as in MCTS, so a
-                # budget spent on pruning does not fall through to HOLD.
-                if n and self.nodes >= self.config.node_budget:
+                if self.nodes >= self.config.node_budget:
                     break
                 new_state = self._resolve(state, my_set + opp_set, commitments)
                 ev_total += evaluate_state(new_state, self.player)
@@ -620,7 +725,11 @@ class Planner:
             scored.append([my_set, ev_total / n, veng_total / n, breaks])
 
         if not scored:
-            return hold_set, DecisionTrace(hold_set, 0, 0, "Fallback to HOLD")
+            return hold_set, DecisionTrace(hold_set, 0, 0, "Fallback to HOLD",
+                                           coverage=coverage)
+
+        if coverage:
+            coverage["evaluated_keep"] = any(not row[3] for row in scored)
 
         # Pass 2 (depth 2): only the leaders are worth the adjudications.
         if self.config.depth >= 2:
@@ -665,18 +774,29 @@ class Planner:
                 best_orders = my_set
                 best_trace = DecisionTrace(
                     my_set, avg_ev, penalty,
-                    self._explain(avg_ev, penalty, net_score, rows, incentive, veng,
-                                  f_rows, loyalty),
+                    self._explain(avg_ev, penalty, net_score, rows,
+                                  avg_ev - best_loyal_ev if loyal_evs else None,
+                                  veng, f_rows, loyalty),
                     bool(rows), penalty_rows=rows, nodes=self.nodes, vengeance=veng,
                     search=self.config.search, candidates=len(my_order_sets), pruned=pruned,
                     forfeit_rows=f_rows,
                 )
 
         if not best_orders:
-            return hold_set, DecisionTrace(hold_set, 0, 0, "Fallback to HOLD")
+            return hold_set, DecisionTrace(hold_set, 0, 0, "Fallback to HOLD",
+                                           coverage=coverage)
 
         best_trace.nodes = self.nodes
         best_trace.reversals = self._break_advantages(state, commitments, scored, nets)
+        if coverage:
+            keeping_nets = [net for row, net in zip(scored, nets) if not row[3]]
+            breaking_nets = [net for row, net in zip(scored, nets) if row[3]]
+            coverage.update(
+                best_keep_net=max(keeping_nets) if keeping_nets else None,
+                best_break_net=max(breaking_nets) if breaking_nets else None,
+                chosen_break=breaks_commitment(state, self.player, best_orders,
+                                                commitments))
+            best_trace.coverage = coverage
         return best_orders, best_trace
 
     def _break_advantages(self, state: GameState, commitments: List[Commitment],
@@ -720,8 +840,7 @@ class Planner:
         """
         stance = stance or {}
         cfg = self.config
-        all_sets = generate_all_order_sets(state, self.player)
-        candidates, pruned = self.prune(state, all_sets, commitments)
+        candidates, pruned, coverage = self._prepare_candidates(state, commitments)
 
         counts = [0] * len(candidates)
         totals = [0.0] * len(candidates)
@@ -732,10 +851,7 @@ class Planner:
             incentives=self._incentives)
 
         i = 0
-        # Pruning has already spent part of the budget. Every surviving
-        # candidate still gets at least one playout, or an exhausted budget
-        # would leave the whole arm table empty and fall through to HOLD.
-        while self.nodes < cfg.node_budget or i < len(candidates):
+        while self.nodes < cfg.node_budget:
             # UCB1: every arm once, then exploit with an exploration bonus.
             if i < len(candidates):
                 arm = i
@@ -767,6 +883,8 @@ class Planner:
         best_orders, best_score, best_trace = [], float('-inf'), None
         loyal = [totals[k] / counts[k] for k in range(len(candidates))
                  if counts[k] and not breaks_commitment(state, self.player, candidates[k], commitments)]
+        if coverage:
+            coverage["evaluated_keep"] = bool(loyal)
         best_loyal_ev = max(loyal) if loyal else 0.0
         forfeits = self._forfeits(state, commitments)
 
@@ -789,8 +907,9 @@ class Planner:
                 best_score, best_orders = net, cand
                 best_trace = DecisionTrace(
                     cand, avg_ev, penalty,
-                    self._explain(avg_ev, penalty, net, rows, incentive, 0.0, f_rows,
-                                  loyalty)
+                    self._explain(avg_ev, penalty, net, rows,
+                                  avg_ev - best_loyal_ev if loyal else None,
+                                  0.0, f_rows, loyalty)
                     + f" [MCTS, {sum(counts)} playouts]",
                     bool(rows), penalty_rows=rows, nodes=self.nodes,
                     search="mcts", candidates=len(candidates), pruned=pruned,
@@ -801,12 +920,17 @@ class Planner:
                               order_type=OrderType.HOLD)
                         for u in state.units if u.player == self.player]
             return hold_set, DecisionTrace(hold_set, 0, 0, "Fallback to HOLD")
+        if coverage:
+            coverage["chosen_break"] = breaks_commitment(
+                state, self.player, best_orders, commitments)
+            best_trace.coverage = coverage
         return best_orders, best_trace
 
     @staticmethod
-    def _explain(avg_ev, penalty, net_score, rows, incentive, vengeance=0.0,
+    def _explain(avg_ev, penalty, net_score, rows, gain, vengeance=0.0,
                  forfeit_rows=(), loyalty=0.0) -> str:
-        """One sentence an examiner can read off the screen."""
+        """One sentence an examiner can read off the screen. `gain` is the raw
+        value over the best loyal order set, None when every option breaks."""
         veng = (f" Revenge worth {vengeance:.2f} counted in."
                 if abs(vengeance) >= 0.005 else "")
         forfeit = "".join(
@@ -823,7 +947,11 @@ class Planner:
             f"Vcoop({partner.value}) {v:.2f} x dP {dp:.2f} x horizon {h:.2f} = {amt:.2f}"
             for partner, v, dp, h, amt in rows
         )
-        return (f"Value {avg_ev:.2f} (gain over staying loyal {incentive:.2f}), "
+        loyal = (f"gain over staying loyal {gain:.2f}" if gain is not None
+                 else "no loyal option")
+        verdict = ("Every option breaks a promise; this one costs least."
+                   if gain is None else
+                   "Breaking still scored higher than every loyal order set.")
+        return (f"Value {avg_ev:.2f} ({loyal}), "
                 f"reputation cost {parts}, total {penalty:.2f}, net {net_score:.2f}. "
-                f"{'Breaking' if net_score > 0 else 'Holding'} priced out at these "
-                f"numbers.{forfeit}{veng}")
+                f"{verdict}{forfeit}{veng}")

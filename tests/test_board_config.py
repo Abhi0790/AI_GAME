@@ -309,3 +309,20 @@ def test_win_fraction_sets_the_default_threshold(fraction, expected):
 def test_win_fraction_out_of_range_is_rejected():
     with pytest.raises(ValueError):
         GameConfig(win_fraction=0).make_board()
+
+
+@pytest.mark.parametrize("seats", [2, 4, 5, 8])
+@pytest.mark.parametrize("rings", [1, 2])
+def test_outer_rings_add_neutral_centres_and_stay_fair(seats, rings):
+    # Construction runs the symmetry check; a wrong reflection raises here.
+    base, b = ring_board(seats), ring_board(seats, outer_rings=rings)
+    k = seats * 2
+    assert len(b.supply_centers) == len(base.supply_centers) + rings * k
+    assert b.win_centers > base.win_centers
+    assert all(0 <= c <= 500 for xy in b.positions.values() for c in xy)
+
+
+def test_a_game_plays_on_a_board_with_outer_rings():
+    result = play(GameConfig(seed=1, n_seats=4, outer_rings=1, max_turns=2,
+                             node_budget=200))
+    assert result.state.turn > 1

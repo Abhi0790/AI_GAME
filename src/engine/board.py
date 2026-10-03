@@ -38,6 +38,9 @@ DEFAULT_WIN_FRACTION = 0.6
 _CANVAS = 500.0
 _HOME_RADIUS = 175.0
 _GAP_RADIUS = 75.0
+_EDGE_RADIUS = 235.0
+# One name letter per outer ring; none collides with a seat code, N or C.
+OUTER_RING_LETTERS = "XZWVU"
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,8 @@ class Board:
     # True: build only on owned, empty home centres (standard Diplomacy).
     # False: build on any owned, empty centre.
     home_builds: bool = True
+    # Squares whose occupant defends at +1, so taking one needs two supports.
+    fortresses: List[str] = field(default_factory=list)
     # territory -> (x, y), for the dashboard
     positions: Dict[str, Tuple[float, float]] = field(default_factory=dict)
     # Territory permutations carrying the board onto itself. Empty means
@@ -68,6 +73,7 @@ class Board:
             {Player(p): list(t) for p, t in self.home_centers.items()})
         put(self, "positions", {t: tuple(xy) for t, xy in self.positions.items()})
         put(self, "_centre_set", set(self.supply_centers))
+        put(self, "_fortress_set", set(self.fortresses))
         # Identifies the map for caches keyed on more than unit placement.
         put(self, "fingerprint", hash(tuple(sorted(
             (t, tuple(n)) for t, n in self.adjacency.items()))))
@@ -90,6 +96,7 @@ class Board:
             "win_centers": self.win_centers,
             "max_turns": self.max_turns,
             "home_builds": self.home_builds,
+            "fortresses": list(self.fortresses),
             "positions": {t: list(xy) for t, xy in self.positions.items()},
             "symmetries": [dict(s) for s in self.symmetries],
         }
@@ -124,6 +131,8 @@ def _check(b: Board) -> None:
         f"board is not connected: {sorted(names - seen_terr)} unreachable from "
         f"{sorted(seen_terr)[0]}")
 
+    assert set(b.fortresses) <= names, (
+        f"fortresses off the board: {sorted(set(b.fortresses) - names)}")
     centres = set(b.supply_centers)
     assert centres <= names, f"supply centres off the board: {sorted(centres - names)}"
 
@@ -171,6 +180,8 @@ def _check_fairness(b: Board, names: set, centres: set) -> None:
                 f"symmetry {i} does not preserve adjacency at {t}")
             assert (t in centres) == (image in centres), (
                 f"symmetry {i} moves {t} onto a square of a different kind")
+            assert (t in b._fortress_set) == (image in b._fortress_set), (
+                f"symmetry {i} moves fortress status at {t}")
         permutation: Dict[Player, Player] = {}
         for t, owner in home_of.items():
             target = home_of.get(sigma[t])
@@ -207,7 +218,9 @@ def ring_board(seats: int | Sequence[Player] = DEFAULT_SEATS,
                win_fraction: float = DEFAULT_WIN_FRACTION,
                max_turns: int = DEFAULT_MAX_TURNS,
                gap_centres: Optional[bool] = None,
-               home_builds: bool = True) -> Board:
+               home_builds: bool = True,
+               outer_rings: int = 0,
+               fortified_homes: bool = False) -> Board:
     """Build a ring map for any seat count.
 
     Home centres form one ring, `homes_per_player` per seat. Each boundary
@@ -225,6 +238,13 @@ def ring_board(seats: int | Sequence[Player] = DEFAULT_SEATS,
     The default makes the contested pool jump with seat parity, which
     confounds any comparison across table sizes; pass True or False to hold it
     fixed instead.
+
+    `outer_rings` adds that many rings of neutral supply centres outside the
+    home ring, one per home slot (X1.., then Z1.., ...). Each outer territory
+    touches its ring neighbours and the territory directly inside it, so the
+    board stays symmetric and every seat gets the same extra land.
+
+    `fortified_homes` makes every home centre a fortress.
     """
     # Validate before slicing: list(Player)[:99] truncates silently.
     n = seats if isinstance(seats, int) else len(seats)
@@ -235,6 +255,8 @@ def ring_board(seats: int | Sequence[Player] = DEFAULT_SEATS,
         raise ValueError("the same player cannot hold two seats")
     if homes_per_player < 1:
         raise ValueError("every seat needs at least one home centre")
+    if not 0 <= outer_rings <= len(OUTER_RING_LETTERS):
+        raise ValueError(f"outer_rings must be 0..{len(OUTER_RING_LETTERS)}, not {outer_rings}")
 
     if not 0 < win_fraction <= 1:
         raise ValueError(f"win_fraction must be in (0, 1], not {win_fraction}")
@@ -259,7 +281,9 @@ def ring_board(seats: int | Sequence[Player] = DEFAULT_SEATS,
             c_names += 1
             gaps.append(f"C{c_names}")
 
-    adjacency: Dict[str, List[str]] = {t: [] for t in ring + gaps}
+    outer = [[f"{OUTER_RING_LETTERS[r]}{i + 1}" for i in range(k)]
+             for r in range(outer_rings)]
+    adjacency: Dict[str, List[str]] = {t: [] for t in ring + gaps + sum(outer, [])}
 
     def link(a: str, b: str) -> None:
         if a != b and b not in adjacency[a]:
@@ -272,10 +296,22 @@ def ring_board(seats: int | Sequence[Player] = DEFAULT_SEATS,
         link(gaps[j], gaps[(j + 1) % n])
         link(gaps[j], ring[(j * homes_per_player + homes_per_player - 1) % k])
         link(gaps[j], ring[(j * homes_per_player + homes_per_player) % k])
+    for r, layer in enumerate(outer):                         # the outer rings
+        inside = outer[r - 1] if r else ring
+        for i in range(k):
+            link(layer[i], layer[(i + 1) % k])
+            link(layer[i], inside[i])
 
-    supply_centers = ring + [g for j, g in enumerate(gaps) if gap_is_centre[j]]
+    supply_centers = (ring + [g for j, g in enumerate(gaps) if gap_is_centre[j]]
+                      + sum(outer, []))
 
-    positions = {t: _polar(i, k, _HOME_RADIUS) for i, t in enumerate(ring)}
+    # Home ring and outer rings share the space between the gaps and the edge.
+    step = ((_EDGE_RADIUS - _GAP_RADIUS) / (outer_rings + 1) if outer_rings
+            else _HOME_RADIUS - _GAP_RADIUS)
+    positions = {t: _polar(i, k, _GAP_RADIUS + step) for i, t in enumerate(ring)}
+    for r, layer in enumerate(outer):
+        positions.update({t: _polar(i, k, _GAP_RADIUS + step * (r + 2))
+                          for i, t in enumerate(layer)})
     positions.update({
         g: _polar(j * homes_per_player + homes_per_player - 0.5, k, _GAP_RADIUS)
         for j, g in enumerate(gaps)
@@ -292,6 +328,10 @@ def ring_board(seats: int | Sequence[Player] = DEFAULT_SEATS,
                 sigma[homes[p][h]] = homes[image][homes_per_player - 1 - h]
         for g in range(n):
             sigma[gaps[g]] = gaps[(2 * j - g) % n]
+        # The same reflection on ring indices: i -> (2j+2)H - 1 - i.
+        for layer in outer:
+            for i in range(k):
+                sigma[layer[i]] = layer[((2 * j + 2) * homes_per_player - 1 - i) % k]
         symmetries.append(sigma)
 
     return Board(
@@ -304,6 +344,7 @@ def ring_board(seats: int | Sequence[Player] = DEFAULT_SEATS,
                               homes_per_player + 1)),
         max_turns=max_turns,
         home_builds=home_builds,
+        fortresses=list(ring) if fortified_homes else [],
         positions=positions,
         symmetries=symmetries,
     )
@@ -383,6 +424,10 @@ def get_all_territories() -> List[str]:
 
 def is_supply_center(territory: str) -> bool:
     return territory in _ACTIVE._centre_set
+
+
+def fortress_bonus(territory: str) -> int:
+    return 1 if territory in _ACTIVE._fortress_set else 0
 
 
 def get_supply_centers() -> List[str]:

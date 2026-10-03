@@ -49,7 +49,7 @@ export default function App() {
   const [config, setConfig] = useState({
     seat: "", chaos: "", seed: "", search: "expectiminimax",
     node_budget: 1500, negotiation_rounds: 3, seating: {},
-    n_seats: 4, max_turns: 12, win_centers: "", win_fraction: 0.6, home_builds: true,
+    n_seats: 4, homes_per_player: 2, outer_rings: 0, max_turns: 12, win_centers: "", win_fraction: 0.6, home_builds: true, fortified_homes: false, order_noise: 0,
   });
   const [error, setError] = useState(null);
   const cancel = useRef(false);
@@ -135,16 +135,21 @@ export default function App() {
         human_seat: config.seat || null,
         chaos_seat: config.chaos || null,
         n_seats: Number(config.n_seats),
+        homes_per_player: Number(config.homes_per_player),
+        outer_rings: Number(config.outer_rings),
         max_turns: Number(config.max_turns),
         win_centers: config.win_centers === "" ? null : Number(config.win_centers),
         win_fraction: Number(config.win_fraction),
         home_builds: config.home_builds,
+        fortified_homes: config.fortified_homes,
+        knobs: Number(config.order_noise) > 0 ? { ORDER_NOISE: Number(config.order_noise) } : {},
       });
       const g = { ...d, id: d.game_id };
       setConfig((c) => ({ ...c, seed: String(d.config.seed), seating: d.config.seating }));
       setGame(g);
       setHistory([]);
       setViewing(-1);
+      setDetail(null);
       setError(null);
       await refreshSeat(g);
     } catch (e) { setError(String(e)); }
@@ -260,6 +265,14 @@ export default function App() {
                  max={(defaults?.seat_colours ?? []).length || 8}
                  value={config.n_seats}
                  onChange={(e) => setConfig({ ...config, n_seats: e.target.value })} />
+          <label htmlFor="homes" title="Home centres per seat; one unit starts on each.">homes</label>
+          <input id="homes" type="number" className="sm" min="1"
+                 value={config.homes_per_player}
+                 onChange={(e) => setConfig({ ...config, homes_per_player: e.target.value })} />
+          <label htmlFor="outer_rings" title="Rings of neutral supply centres outside the home ring, one centre per home centre each.">outer rings</label>
+          <input id="outer_rings" type="number" className="sm" min="0" max="5"
+                 value={config.outer_rings}
+                 onChange={(e) => setConfig({ ...config, outer_rings: e.target.value })} />
           <label htmlFor="max_turns">turns</label>
           <input id="max_turns" type="number" className="sm" min="1"
                  value={config.max_turns}
@@ -275,6 +288,13 @@ export default function App() {
           <label htmlFor="home_builds" title="Build new units only on your own home centres, as in standard Diplomacy. Off: build on any centre you own.">home builds</label>
           <input id="home_builds" type="checkbox" checked={config.home_builds}
                  onChange={(e) => setConfig({ ...config, home_builds: e.target.checked })} />
+          <label htmlFor="fortified_homes" title="Home centres defend at +1, so taking one needs two supports.">forts</label>
+          <input id="fortified_homes" type="checkbox" checked={config.fortified_homes}
+                 onChange={(e) => setConfig({ ...config, fortified_homes: e.target.checked })} />
+          <label htmlFor="order_noise" title="Chance each order is lost and the unit holds instead. A lost promised order counts as broken.">noise</label>
+          <input id="order_noise" type="number" className="sm" min="0" max="1" step="0.05"
+                 value={config.order_noise}
+                 onChange={(e) => setConfig({ ...config, order_noise: e.target.value })} />
           {setupSeats.map((p) => (
             <React.Fragment key={p}>
               <label htmlFor={`persona-${p}`}>{p}</label>
@@ -355,7 +375,10 @@ export default function App() {
                 key={p}
                 className={`score${detail === p ? " sel" : ""}`}
                 onClick={() => setDetail(detail === p ? null : p)}
-                title={`Open ${p}'s internals`}
+                disabled={Boolean(game?.human_seat && !game.finished && p !== game.human_seat)}
+                title={game?.human_seat && !game.finished && p !== game.human_seat
+                  ? "Other seats' internals are available after the game"
+                  : `Open ${p}'s internals`}
               >
                 <div className="who">
                   <span className="dot" style={{ background: COLOR[p] }} />

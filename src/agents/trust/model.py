@@ -226,7 +226,11 @@ class TrustModel:
         a long-trusted partner costs little and a pattern costs a lot.
         """
         w = break_weight(incentive)
-        before = self.p_keeps(player, c_type, incentive, toward)
+        # Keep the reputation price tied to the learned CPT even in an
+        # experiment that substitutes a constant *decision* forecast. The
+        # ablation should change what the agent expects of a partner, not
+        # silently remove the cost of its own betrayal.
+        before = p_keeps_given(self.get_reliability(player, c_type, toward), incentive)
 
         def broken_mean(rec: TrustRecord) -> float:
             a, b = rec.alpha * EVIDENCE_DECAY, rec.beta * EVIDENCE_DECAY
@@ -271,3 +275,22 @@ class TrustModel:
             for subject in players()
             for c_type in CommitmentType
         ]
+
+
+class ConstantForecastTrustModel(TrustModel):
+    """Control arm: one held-out P(keeps), with ordinary belief updates.
+
+    Only the forecast used by negotiation, policy and opponent sampling is
+    replaced. Beta evidence and reputation_drop keep their usual mechanics.
+    """
+
+    def __init__(self, owner: Player, probability: float,
+                 prior_alpha: float = 1.0, prior_beta: float = 1.0):
+        if not 0.0 <= probability <= 1.0:
+            raise ValueError("constant keep forecast must be in [0, 1]")
+        super().__init__(owner, prior_alpha, prior_beta)
+        self.probability = probability
+
+    def p_keeps(self, player: Player, c_type: CommitmentType,
+                incentive: float = 0.0, toward: Optional[Player] = None) -> float:
+        return self.probability

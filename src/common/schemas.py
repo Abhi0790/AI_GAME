@@ -165,7 +165,8 @@ class DecisionTrace:
                  vengeance: float = 0.0, search: str = "expectiminimax",
                  candidates: int = 0, pruned: int = 0,
                  reversals: Optional[List[tuple]] = None,
-                 forfeit_rows: Optional[List[tuple]] = None):
+                 forfeit_rows: Optional[List[tuple]] = None,
+                 coverage: Optional[Dict[str, Any]] = None):
         self.candidate_orders = candidate_orders
         self.expected_value = expected_value
         self.penalty = penalty
@@ -180,6 +181,7 @@ class DecisionTrace:
         self.search = search
         self.candidates = candidates  # order sets after pruning
         self.pruned = pruned          # order sets discarded by dominance
+        self.coverage = coverage or {}  # optional research diagnostics
         # (commitment_key, break advantage) per live deal I am in: how much
         # better my best treacherous order set scores than my best loyal one,
         # *after* the reputation penalty. Positive means that at order time I
@@ -418,6 +420,8 @@ class TurnRecord(NamedTuple):
     commitments: List[Commitment] = ()
     nodes: Dict[Player, int] = ()            # adjudications the search budget counted
     total_nodes: Dict[Player, int] = ()      # every adjudication the seat caused, negotiation included
+    intended: List[Order] = ()               # orders as submitted, before ORDER_NOISE
+    slipped: List[Order] = ()                # submitted orders that were lost and became holds
 
 
 class ReversalPoint(BaseModel):

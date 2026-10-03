@@ -1,17 +1,20 @@
 import random
+import hashlib
+import zlib
+from contextlib import contextmanager
 from typing import List, Dict, Optional
 
 from src.common.schemas import (
-    GameState, Order, Player, Commitment, Message, MessageType,
+    GameState, Order, OrderType, Player, Commitment, CommitmentType, Message, MessageType,
     Unit, CalibrationPoint, ReversalPoint, TurnRecord,
 )
 from src.common.schemas import (
     message_to_commitment, commitment_key, invalid_proposal_reason, leaders,
-    obligated_parties, mirrors,
+    obligated_parties, mirrors, exchange_leg_due,
 )
 from src.engine import adjudicator
 from src.engine.adjudicator import resolve
-from src.engine.orders import _SETS_CACHE
+from src.engine.orders import _SETS_CACHE, generate_orders_for_unit
 from src.engine.board import (
     get_all_territories, get_supply_centers, home_centers, win_centers, max_turns,
     players,
@@ -27,6 +30,10 @@ AGENT_METHODS = ("propose", "reply", "act", "update_beliefs_from_outcomes",
 # 0 keeps secrets forever; 1 reproduces the old behaviour, where every agent
 # was handed every deal regardless of who signed it.
 PRIVATE_LEAK_RATE = 0.0
+
+# Chance that a unit's order is lost and it holds instead. Commitments are
+# graded on what was executed, so a slip can look exactly like a betrayal.
+ORDER_NOISE = 0.0
 
 
 class GameRunner:
@@ -89,11 +96,26 @@ class GameRunner:
         # Adjudications each seat has caused this turn, budgeted or not.
         self._work: Dict[Player, int] = {p: 0 for p in self.agents}
 
-    def _charge(self, player: Player, fn, *args):
+    @contextmanager
+    def _event_rng(self, key):
+        cfg = getattr(self, "config", None)
+        if cfg is None or not cfg.event_keyed_rng:
+            yield
+            return
+        old = random.getstate()
+        material = f"{cfg.seed}:{key!r}".encode("utf-8")
+        random.seed(int.from_bytes(hashlib.sha256(material).digest()[:16], "big"))
+        try:
+            yield
+        finally:
+            random.setstate(old)
+
+    def _charge(self, player: Player, fn, *args, event_key=None):
         """Call an agent method, charging the adjudications it causes to that seat."""
         before = adjudicator.resolve_calls
         try:
-            return fn(*args)
+            with self._event_rng(event_key):
+                return fn(*args)
         finally:
             self._work[player] += adjudicator.resolve_calls - before
 
@@ -107,7 +129,8 @@ class GameRunner:
         """
         if self._opening is None:
             self._opening = [m for p, a in self.agents.items()
-                             for m in self._charge(p, a.propose, self.state, self.visible_to(p))]
+                             for m in self._charge(p, a.propose, self.state, self.visible_to(p),
+                                                   event_key=("propose", self.state.turn, p.value))]
         return self._opening
 
     def _negotiate(self, log_lines: List[str]) -> List[Message]:
@@ -121,7 +144,7 @@ class GameRunner:
         self._opening = None
         spoken: List[Message] = list(new_messages)
 
-        for _ in range(self.negotiation_rounds):
+        for round_index in range(self.negotiation_rounds):
             if not new_messages:
                 break
 
@@ -136,7 +159,9 @@ class GameRunner:
 
             replies: List[Message] = []
             for p, a in self.agents.items():
-                replies.extend(self._charge(p, a.reply, self.state, inbox[p], self.visible_to(p)))
+                replies.extend(self._charge(
+                    p, a.reply, self.state, inbox[p], self.visible_to(p),
+                    event_key=("reply", self.state.turn, round_index, p.value)))
 
             by_id = {m.id: m for m in new_messages}
             for rep in replies:
@@ -171,6 +196,15 @@ class GameRunner:
                         f"Deal dropped: {c.players[0].value} supporting "
                         f"{c.players[1].value} into {c.target_territory} mirrors a "
                         f"live deal the other way; both would support and neither move")
+                    continue
+                stuck = next((q for q in c.players if not self._keepable(q, c)), None)
+                if stuck:
+                    # Signing it would leave a player no order set that keeps
+                    # every promise it holds, so the next break is forced, not
+                    # chosen, and would be graded as a betrayal it never priced.
+                    log_lines.append(
+                        f"Deal dropped: {stuck.value} cannot keep a "
+                        f"{c.commitment_type.value} deal alongside its live promises")
                     continue
                 existing = next(
                     (e for e in self.commitments
@@ -217,6 +251,57 @@ class GameRunner:
 
         return spoken
 
+    def _keepable(self, player: Player, c: Commitment) -> bool:
+        """Whether some order set this turn keeps c and every live promise of
+        player's, unless those were already unkeepable without c.
+
+        Only support promises require a particular order; alliances and DMZs
+        can always be honoured by holding. Assign each distinct required
+        support to a different unit that can legally give it. This is exact
+        even when the planner samples its much larger joint order space.
+        A future exchange repayment still needs a separate future-state check.
+        """
+        live = [e for e in self.commitments
+                if player in e.players and commitment_key(e) != commitment_key(c)]
+
+        def ok(deals):
+            required = set()
+            for deal in deals:
+                if deal.commitment_type == CommitmentType.SUPPORT and deal.players[0] == player:
+                    required.add((deal.supported_from, deal.target_territory))
+                elif deal.commitment_type == CommitmentType.EXCHANGE:
+                    if exchange_leg_due(deal, self.state.turn) == "give" and deal.players[0] == player:
+                        required.add((deal.supported_from, deal.target_territory))
+            if not required:
+                return True
+
+            capable = {}
+            for u in self.state.units:
+                if u.player != player:
+                    continue
+                for order in generate_orders_for_unit(self.state, u):
+                    if order.order_type == OrderType.SUPPORT:
+                        key = (order.supported_from, order.target)
+                        if key in required:
+                            capable.setdefault(key, []).append(u.territory)
+
+            assigned = {}
+
+            def assign(need, seen):
+                for territory in capable.get(need, []):
+                    if territory in seen:
+                        continue
+                    seen.add(territory)
+                    if territory not in assigned or assign(assigned[territory], seen):
+                        assigned[territory] = need
+                        return True
+                return False
+
+            return all(assign(need, set()) for need in sorted(required, key=str))
+        # Blame the new deal only: promises the board has already made
+        # unkeepable (a supporter dislodged) must not freeze out every deal.
+        return ok(live + [c]) or not ok(live)
+
     def _notify_signed(self, c: Commitment) -> None:
         for p in c.players:
             agent = self.agents.get(p)
@@ -244,8 +329,9 @@ class GameRunner:
             for p in self.agents:
                 if p in c.players or p in known:
                     continue
-                if random.random() < PRIVATE_LEAK_RATE:
-                    known.add(p)
+                with self._event_rng(("leak", self.state.turn, commitment_key(c), p.value)):
+                    if random.random() < PRIVATE_LEAK_RATE:
+                        known.add(p)
 
     # ── calibration ─────────────────────────────────────────────────────
     def _open_predictions(self) -> List[CalibrationPoint]:
@@ -262,11 +348,15 @@ class GameRunner:
                     if subject == observer:
                         continue
                     if hasattr(agent, "predict_keep_parts"):
-                        r, i, pred = self._charge(observer, agent.predict_keep_parts,
-                                                  self.state, c, subject)
+                        r, i, pred = self._charge(
+                            observer, agent.predict_keep_parts, self.state, c, subject,
+                            event_key=("predict", self.state.turn, commitment_key(c),
+                                       observer.value, subject.value))
                     else:
-                        r, i, pred = 0.5, 0.0, self._charge(observer, agent.predict_keep,
-                                                            self.state, c, subject)
+                        r, i, pred = 0.5, 0.0, self._charge(
+                            observer, agent.predict_keep, self.state, c, subject,
+                            event_key=("predict", self.state.turn, commitment_key(c),
+                                       observer.value, subject.value))
                     points.append(CalibrationPoint(
                         turn=self.state.turn, observer=observer, subject=subject,
                         commitment_type=c.commitment_type, commitment_id=c.id,
@@ -325,16 +415,24 @@ class GameRunner:
         traces: Dict[Player, object] = {}
         nodes: Dict[Player, int] = {}
         for p, a in self.agents.items():
-            orders, trace = self._charge(p, a.act, self.state, self.visible_to(p))
+            orders, trace = self._charge(
+                p, a.act, self.state, self.visible_to(p),
+                event_key=("act", self.state.turn, p.value))
             all_orders.extend(orders)
             traces[p] = trace
             nodes[p] = getattr(getattr(a, "planner", None), "nodes", 0)
             self.reversals.extend(self._reversals(p, a, trace))
 
+        intended = all_orders
+        all_orders, slipped = self._slip(all_orders)
+
         # 5. Engine resolves and grades commitments
         new_state, outcomes, log = resolve(self.state, all_orders, self.commitments)
         for line in negotiation_lines:
             log.events.insert(0, line)
+        for o in slipped:
+            log.events.append(f"Order lost: {o.unit_territory} held instead of "
+                              f"{o.order_type.value} {o.target or ''}".rstrip())
         if self.on_turn_resolved:
             self.on_turn_resolved(self.state, all_orders, log)
 
@@ -382,12 +480,32 @@ class GameRunner:
             state=self.state, orders=all_orders, outcomes=outcomes, log=log,
             traces=traces, messages=messages, beliefs=beliefs,
             commitments=live_this_turn, nodes=nodes, total_nodes=dict(self._work),
+            intended=intended, slipped=slipped,
         )
         self._work = {p: 0 for p in self.agents}
         self.history.append(record)
         self.nodes_per_turn.append(nodes)
         self.state = new_state
         return record
+
+    def _slip(self, orders: List[Order]):
+        """Replace each non-hold order with a hold at rate ORDER_NOISE.
+
+        Drawn from crc32 of (seed, turn, unit), so noise neither consumes nor
+        shifts the game's random stream.
+        """
+        if ORDER_NOISE <= 0:
+            return orders, []
+        seed = getattr(getattr(self, "config", None), "seed", 0)
+        executed, slipped = [], []
+        for o in orders:
+            draw = zlib.crc32(f"{seed}|{self.state.turn}|{o.unit_territory}".encode()) / 2**32
+            if o.order_type != OrderType.HOLD and draw < ORDER_NOISE:
+                slipped.append(o)
+                o = Order(player=o.player, unit_territory=o.unit_territory,
+                          order_type=OrderType.HOLD)
+            executed.append(o)
+        return executed, slipped
 
     def _reversals(self, player: Player, agent, trace) -> List[ReversalPoint]:
         """Pair each deal this agent signed with what its planner then did.

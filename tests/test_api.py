@@ -148,6 +148,64 @@ def test_private_deals_do_not_reach_a_seat_that_is_not_a_party():
         assert not com["private"] or "Red" in com["players"]
 
 
+def test_human_history_hides_private_verdicts_and_other_agents_internals():
+    from types import SimpleNamespace
+    from src.common.schemas import (
+        BeliefSnapshot, Commitment, CommitmentOutcome, CommitmentType,
+        DecisionTrace, GameState, Message, MessageType, Player,
+    )
+    from src.agents.negotiation.strategy import NegotiationStrategy
+    from src.agents.planner.planner import Planner, PlannerConfig
+
+    secret = Commitment(id="secret", commitment_type=CommitmentType.ALLIANCE,
+                        players=[Player.BLUE, Player.GREEN], valid_until_turn=2,
+                        private=True)
+    public = Commitment(id="public", commitment_type=CommitmentType.ALLIANCE,
+                        players=[Player.RED, Player.BLUE], valid_until_turn=2)
+    offer = Message(id="private-offer", sender=Player.GREEN, receiver=Player.BLUE,
+                    message_type=MessageType.PROPOSE,
+                    commitment_type=CommitmentType.ALLIANCE, turns=2, private=True)
+    reply = NegotiationStrategy(Player.BLUE, Planner(Player.BLUE, PlannerConfig()))._accept(offer)
+    assert reply.private
+    state = GameState(turn=1, units=[], supply_centers={}, territory_owners={})
+    step = SimpleNamespace(
+        state=state, orders=[],
+        outcomes=[CommitmentOutcome(secret, False, [Player.BLUE]),
+                  CommitmentOutcome(public, True, [])],
+        log=SimpleNamespace(events=[
+            "Commitment created: Alliance between Blue & Green [private]",
+            "Move succeeds: B1 -> N1"]),
+        messages=[offer, reply], commitments=[secret, public], nodes={}, total_nodes={},
+        beliefs=[BeliefSnapshot(observer=p, subject=Player.GREEN,
+                                commitment_type=CommitmentType.ALLIANCE,
+                                alpha=1, beta_param=1, expected_reliability=0.5)
+                 for p in (Player.RED, Player.BLUE)],
+        traces={p: DecisionTrace([], 1.0, 0.0, "private reasoning")
+                for p in (Player.RED, Player.BLUE)},
+    )
+
+    view = app_module._serialise_history_step(step, Player.RED)
+    assert [o["players"] for o in view["outcomes"]] == [["Red", "Blue"]]
+    assert [c["id"] for c in view["commitments"]] == ["public"]
+    assert view["messages"] == []
+    assert view["log"] == ["Move succeeds: B1 -> N1"]
+    assert [b["observer"] for b in view["beliefs"]] == ["Red"]
+    assert list(view["traces"]) == ["Red"]
+    assert len(app_module._serialise_history_step(step)["outcomes"]) == 2
+    assert len(app_module._serialise_history_step(step)["messages"]) == 2
+
+
+def test_live_human_cannot_inspect_other_seats_or_publish_full_replay():
+    gid = client.post("/api/game/new", json={
+        "seed": 3, "human_seat": "Red", "node_budget": 100,
+    }).json()["game_id"]
+    assert client.get(f"/api/game/{gid}/inspect/Blue").status_code == 403
+    assert client.post(f"/api/game/{gid}/save").status_code == 409
+    summary = client.get(f"/api/game/{gid}/state").json()
+    assert summary["brier"] is None and summary["reliability"] == []
+    assert summary["reversals"] == {}
+
+
 def test_a_malformed_order_is_a_400_not_a_crash():
     gid = client.post("/api/game/new", json={
         "seed": 3, "human_seat": "Red", "node_budget": 150, "max_turns": 4,
