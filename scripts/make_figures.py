@@ -12,11 +12,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
 import json
-import os
 from collections import defaultdict
 
-from src.common.config import GameConfig, PERSONA_ORDER
-from src.common.schemas import leaders
+from src.common.config import GameConfig, PERSONA_ORDER, DEFAULT_GAMES
 from src.harness import play_many
 from src.evaluation import figures
 from src.evaluation.metrics import (
@@ -34,7 +32,7 @@ def _centres_by_persona(cfg, runner):
 def _variant_result(cfg, runner):
     """(win share, budgeted and total adjudications per turn) for the variant seat."""
     seat = next(iter(cfg.seat_planner))
-    ahead = leaders(final_scores(runner.state))
+    ahead = runner.leaders()
     return (1.0 / len(ahead) if seat in ahead else 0.0,
             [step.nodes[seat] for step in runner.history],
             [step.total_nodes[seat] for step in runner.history])
@@ -42,8 +40,8 @@ def _variant_result(cfg, runner):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--games", type=int, default=MIN_GAMES)
-    ap.add_argument("--games-per-cell", type=int, default=MIN_GAMES,
+    ap.add_argument("--games", type=int, default=DEFAULT_GAMES)
+    ap.add_argument("--games-per-cell", type=int, default=DEFAULT_GAMES,
                     help="games behind each search x budget cell of figure 6")
     ap.add_argument("--out", default="figures")
     args = ap.parse_args()
@@ -113,9 +111,9 @@ def main():
         f"{args.out}/4_turns_to_coalition.png", dpi=160)
     summary["turns_to_coalition"] = coalition
 
-    # ── 6: win rate vs budget, expectiminimax vs MCTS ───────────────────
+    # ── 6: win rate vs budget, expectimax vs MCTS vs regret matching ────
     cell_seeds = list(range(1, args.games_per_cell + 1))
-    print(f"Comparing expectiminimax and MCTS at equal budgets "
+    print(f"Comparing expectimax, MCTS and regret matching at equal budgets "
           f"({len(cell_seeds)} games per cell)...")
     if len(cell_seeds) < MIN_GAMES:
         print(f"  warning: {len(cell_seeds)} < MIN_GAMES={MIN_GAMES}; figure 6 "
@@ -128,7 +126,7 @@ def main():
         return next((p for p, name in seating.items() if name == want),
                     list(seating)[s % len(seating)])
 
-    cells = [(search, budget) for search in ("expectiminimax", "mcts")
+    cells = [(search, budget) for search in ("expectimax", "mcts", "regret")
              for budget in (400, 900, 1800)]
     # One seat on the variant at budget B; the others stay on the default planner.
     results = play_many((GameConfig(seed=s, seat_planner={

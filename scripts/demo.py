@@ -46,7 +46,7 @@ def main():
                         print(f"  Explanation: {trace.explanation}")
                         print(f"  Expected value of orders: {trace.expected_value:.2f}")
                         print(f"  Penalty calculated for breaking: {trace.penalty:.2f}")
-                        print(f"  (Since Expected Value > Penalty, the betrayal was executed)")
+                        print("  (Since Expected Value > Penalty, the betrayal was executed)")
 
 
 if __name__ == "__main__":

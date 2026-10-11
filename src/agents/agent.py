@@ -1,14 +1,17 @@
+import itertools
+import uuid
 from typing import List, Dict, Tuple, Optional
 
 from src.common.schemas import (
-    Player, GameState, Order, OrderType, Commitment, CommitmentType, Message,
-    MessageType, TrustTrace, BeliefSnapshot, obligated_parties,
+    Player, GameState, Order, OrderType, Commitment, CommitmentType, Message, Unit,
+    MessageType, TrustTrace, BeliefSnapshot, obligated_parties, leaders,
 )
-from src.engine.board import players, get_adjacent
+from src.engine.board import players, get_adjacent, is_supply_center, province, built_unit, unit_moves
+from src.agents.trust import model as trust_params
 from src.agents.trust.model import TrustModel
 from src.agents.trust.rules import RuleEngine, OutcomeRule, PublicRecordRule
 from src.agents.planner.planner import (
-    Planner, PlannerConfig, DecisionTrace, evaluate_state, cooperation_value,
+    Planner, PlannerConfig, DecisionTrace, evaluate_state, breaks_commitment,
     defection_incentive, near_win, CENTRE_VALUE,
 )
 from src.agents.negotiation.strategy import NegotiationStrategy
@@ -23,10 +26,12 @@ THREAT_WEIGHT = 0.4
 # The "trust" policy believes a partner whose P(keep) toward it is at least this;
 # the same even-odds line fit_cpt holds a three-time betrayer below.
 TRUST_LINE = 0.5
-# A betrayal anyone could see, decayed like a grudge. Every policy but "none"
-# signs nothing with a player whose record is at or above INFAMY_LINE: one
-# break this turn, or a habit of them.
+# Every policy but "none" signs nothing with a player whose decayed count of
+# visible betrayals is at or above this.
 INFAMY_LINE = 1.0
+# Turns without a centre changing hands before a stalemate is worth sharing.
+# Spring turns never move centres, so 4 is two quiet years.
+DRAW_STALL_TURNS = 4
 
 
 class Agent:
@@ -68,6 +73,13 @@ class Agent:
         self._wronged: List[Tuple[Player, Player]] = []    # (victim, betrayer) last turn
         self._wronged_next: List[Tuple[Player, Player]] = []
         self._orders_state: Optional[GameState] = None
+        # Second-order beliefs: my record and infamy as each other player has seen them.
+        self.seen_by: Dict[Player, List[float]] = {}
+        self.infamy_with: Dict[Player, float] = {}
+        # Stated intentions: what each player said it would move this turn,
+        # and [alpha, beta] of how often its words matched its orders.
+        self.heard: Dict[Player, List[Tuple[str, str]]] = {}
+        self.candour: Dict[Player, List[float]] = {}
 
     def set_persona(self, persona_name: str, rep_cost_scale: float = 1.0):
         """Take on a persona's parameters. Beliefs and grudges carry over,
@@ -134,32 +146,24 @@ class Agent:
     def decay_stance(self):
         self.grudges = {p: v * GRUDGE_DECAY for p, v in self.grudges.items() if v * GRUDGE_DECAY > 0.05}
         self.infamy = {p: v * GRUDGE_DECAY for p, v in self.infamy.items() if v * GRUDGE_DECAY > 0.05}
+        self.infamy_with = {p: v * GRUDGE_DECAY for p, v in self.infamy_with.items()
+                            if v * GRUDGE_DECAY > 0.05}
         self.deterrence = {p: v * THREAT_DECAY for p, v in self.deterrence.items() if v * THREAT_DECAY > 0.05}
 
     # ── incentives ──────────────────────────────────────────────────────
     def estimate_incentive(self, prev_state: GameState, new_state: GameState,
                            defector: Player) -> float:
-        """How lucrative the break looked, from the board alone.
+        """How lucrative the break looked: the breaker's swing in position, in [0, 1].
 
-        The observer cannot see the defector's search, only what the turn won
-        them. Positions are already denominated in centres, so the swing over
-        one centre is a usable iota in [0, 1].
-
-        ponytail: attributes the whole turn's swing to the betrayal. Good
-        enough while one break resolves per turn; split it per commitment if
-        multi-break turns become common.
+        ponytail: attributes the whole turn's swing to the betrayal; split it per
+        commitment if multi-break turns become common.
         """
         gain = evaluate_state(new_state, defector) - evaluate_state(prev_state, defector)
         return min(1.0, max(0.0, gain / CENTRE_VALUE))
 
     def predict_keep(self, state: GameState, commitment: Commitment,
                      subject: Player) -> float:
-        """P(this player keeps this deal), through the trust network.
-
-        Logged at the moment a commitment is formed so it can be paired with
-        the engine's verdict later — that pair is the only thing that says
-        whether these numbers mean anything.
-        """
+        """P(this player keeps this deal), through the trust network."""
         return self.predict_keep_parts(state, commitment, subject)[2]
 
     def predict_keep_parts(self, state: GameState, commitment: Commitment,
@@ -174,21 +178,8 @@ class Agent:
     # ── learning ────────────────────────────────────────────────────────
     def update_beliefs_from_outcomes(self, prev_state: GameState,
                                      new_state: GameState, outcomes: List):
-        """Three tiers of evidence, and they are deliberately different.
-
-          in the deal   first hand. Moves this player's reputation *and* what
-                        I have seen them do to me specifically.
-          public, not
-          in the deal   the engine published it, so I saw it. Reputation only:
-                        watching two other players deal says nothing about how
-                        either treats me.
-          private, not
-          in the deal   invisible: a deal I am not in and cannot see.
-
-        The middle tier is what makes the pair records mean anything. Without
-        it an agent's general view of a player was built from exactly the same
-        evidence as its pair view, so the two could never disagree.
-        """
+        """Learn from graded deals: my own move reputation and pair records, public
+        ones move reputation only, private ones I am not in are unseen."""
         for o in outcomes:
             for breaker in o.broken_by:
                 if breaker != self.player:
@@ -202,9 +193,7 @@ class Agent:
                     (self.estimate_incentive(prev_state, new_state, p) for p in o.broken_by),
                     default=0.0,
                 )
-                # The rule engine owns the Beta updates -- it applies them
-                # *and* records which rule fired. Calling update_from_outcome
-                # here too would count every outcome twice.
+                # The rule engine applies the Beta updates and records which rule fired.
                 self.trust_traces.extend(self.rule_engine.process(
                     self.trust_model, {'outcome': o, 'turn': prev_state.turn,
                                        'incentive_to_defect': incentive}
@@ -217,6 +206,8 @@ class Agent:
                     self.trust_model,
                     {'public_outcome': o, 'turn': prev_state.turn}))
 
+            self._witnessed(o, prev_state.turn)
+
         self.opponent_model.observe_commitment_outcomes(
             [o for o in outcomes if self.player in o.commitment.players])
         # The orders observed next are the ones given in prev_state; the
@@ -226,6 +217,36 @@ class Agent:
             {(v, b) for o in outcomes for b in o.broken_by
              for v in o.commitment.players if v != b},
             key=lambda vb: (vb[0].value, vb[1].value))
+
+    def _witnessed(self, o, turn: int) -> None:
+        """Update what each witness of this outcome now thinks of me."""
+        if self.player not in obligated_parties(o.commitment, turn):
+            return
+        broke = self.player in o.broken_by
+        witnesses = o.commitment.players if o.commitment.private else players()
+        for x in witnesses:
+            if x == self.player:
+                continue
+            a, b = self.seen_by.get(x, [1.0, 1.0])
+            decay = trust_params.EVIDENCE_DECAY
+            a, b = 1.0 + (a - 1.0) * decay, 1.0 + (b - 1.0) * decay
+            self.seen_by[x] = [a, b + 1.0] if broke else [a + 1.0, b]
+            if broke:
+                self.infamy_with[x] = self.infamy_with.get(x, 0.0) + 1.0
+
+    def standing_with(self, x: Player) -> float:
+        """My promise-keeping as I estimate x sees it, in [0, 1]."""
+        a, b = self.seen_by.get(x, [1.0, 1.0])
+        return a / (a + b)
+
+    def expects_refusal(self, x: Player) -> bool:
+        """Has x seen enough of me breaking promises to refuse a deal?
+
+        ponytail: assumes x refuses on the same infamy line I would. Learn the
+        line per opponent from their actual replies if personas diverge.
+        """
+        return (self.infamy_with.get(x, 0.0) >= INFAMY_LINE
+                and self.standing_with(x) < TRUST_LINE)
 
     def deal_signed(self, commitment: Commitment, turn: int):
         """Called by the runner when a deal this seat is in is signed or renewed."""
@@ -247,12 +268,7 @@ class Agent:
         self._wronged = self._wronged_next
 
     def receive_threat(self, msg: Message):
-        """A threat is not accepted or rejected, it is believed or not.
-
-        Believed in proportion to how much of it they have shown before: an
-        agent that has actually retaliated is frightening, one that has only
-        ever talked is not.
-        """
+        """Believe a threat in proportion to how often the sender has retaliated."""
         credibility = self.opponent_model.retaliation_rate(msg.sender)
         self.deterrence[msg.sender] = self.deterrence.get(msg.sender, 0.0) + credibility
 
@@ -261,7 +277,42 @@ class Agent:
                 commitments: Optional[List[Commitment]] = None) -> List[Message]:
         self.negotiation._live_commitments = commitments or []
         self.negotiation.refuse = self.policy(state)[2]
+        self.negotiation.rebuffed = {p for p in players() if p != self.player
+                                     and self.expects_refusal(p)}
+        self.negotiation.standing = {p: self.standing_with(p) for p in players()
+                                     if p != self.player}
+        self.heard = {}
+        self.planner.announced = []
         return self.negotiation.generate_proposals(state, self.trust_model)
+
+    def announce(self, state: GameState, commitments: List[Commitment]) -> List[Message]:
+        """After the deals are struck: tell everyone the move into a centre I
+        do not own that my best deal-keeping order set makes, if any."""
+        self.planner.announced = []
+        for cand in self.negotiation._candidates(state, commitments):
+            if breaks_commitment(state, self.player, cand, commitments):
+                continue
+            for o in cand:
+                if (o.order_type == OrderType.MOVE and is_supply_center(o.target)
+                        and state.supply_centers.get(o.target) != self.player):
+                    self.planner.announced = [(o.unit_territory, o.target)]
+                    return [Message(id=str(uuid.uuid4()), sender=self.player,
+                                    message_type=MessageType.INTENT,
+                                    supported_from=o.unit_territory, target_territory=o.target)]
+            return []
+        return []
+
+    def observe_intents(self, graded: List[Tuple[Message, bool]]) -> None:
+        """Score each announcer's candour on what it actually did."""
+        decay = trust_params.EVIDENCE_DECAY
+        for m, done in graded:
+            a, b = self.candour.get(m.sender, [1.0, 1.0])
+            a, b = 1.0 + (a - 1.0) * decay, 1.0 + (b - 1.0) * decay
+            self.candour[m.sender] = [a + 1.0, b] if done else [a, b + 1.0]
+
+    def candour_of(self, p: Player) -> float:
+        a, b = self.candour.get(p, [1.0, 1.0])
+        return a / (a + b)
 
     def reply(self, state: GameState, incoming: List[Message],
               commitments: Optional[List[Commitment]] = None) -> List[Message]:
@@ -271,6 +322,10 @@ class Agent:
         for msg in incoming:
             if msg.message_type == MessageType.THREAT:
                 self.receive_threat(msg)
+                continue
+            if msg.message_type == MessageType.INTENT:
+                self.heard.setdefault(msg.sender, []).append(
+                    (msg.supported_from, msg.target_territory))
                 continue
             if msg.message_type not in (MessageType.PROPOSE, MessageType.COUNTER):
                 continue
@@ -286,35 +341,66 @@ class Agent:
         self.planner.partner_weight = weights
         self.planner.retaliation = {p: self.retaliation_rate(p) for p in players()
                                     if p != self.player}
+        self.opponent_model.intents = self.heard
+        self.opponent_model.candour = {p: self.candour_of(p) for p in self.heard}
         return self.planner.find_best_orders(
             state, active_commitments, self.trust_model, self.stance())
+
+    def choose(self, kind: str, options: List[str], count: int,
+               state: GameState) -> List[str]:
+        """Retreat, build or disband: the option set that leaves the best position."""
+        if kind == "retreat":
+            picks = [[t] for t in options]
+            after = lambda pick: state.units + [Unit(player=self.player, territory=province(pick[0]))]
+        elif kind == "build":
+            n = min(count, len({province(t.removeprefix("F ")) for t in options}))
+            picks = [list(c) for c in itertools.combinations(options, n)
+                     if len({province(t.removeprefix("F ")) for t in c}) == n]
+            after = lambda pick: state.units + [built_unit(self.player, t) for t in pick]
+        else:
+            picks = [list(c) for c in itertools.combinations(options, count)]
+            after = lambda pick: [u for u in state.units
+                                  if not (u.player == self.player and u.territory in pick)]
+        # ponytail: first 64 combinations only; rank by distance if boards get big.
+        picks = picks[:64]
+        if not picks:
+            return []
+        def reach(pick):
+            """Centres not mine the built units could step to; breaks army/fleet ties."""
+            if kind != "build":
+                return 0
+            return sum(is_supply_center(province(loc))
+                       and state.supply_centers.get(province(loc)) != self.player
+                       for t in pick for loc in unit_moves(built_unit(self.player, t)))
+        return max(picks, key=lambda pick: (evaluate_state(
+            state.model_copy(update={"units": after(pick)}), self.player), reach(pick)))
+
+    def vote_draw(self, state: GameState, stalled: int) -> bool:
+        """Share the game once it has stalled, unless I lead alone."""
+        counts = {p: 0 for p in players()}
+        for owner in state.supply_centers.values():
+            if owner:
+                counts[owner] += 1
+        return stalled >= DRAW_STALL_TURNS and leaders(counts) != [self.player]
 
     def beliefs(self) -> List[BeliefSnapshot]:
         return self.trust_model.snapshot()
 
 
 class HumanAgent(Agent):
-    """A seat played by a person through the web UI.
-
-    It is a full Agent — same trust model, same opponent model, same beliefs
-    panel — with the two decisions a human makes swapped in: which orders to
-    give, and which proposals to take. Everything else (learning from
-    outcomes) happens exactly as it does for the AI, so
-    the trust view and the decision trace stay meaningful with a person in
-    the game.
-    """
+    """A seat played by a person: a full Agent whose orders, answers to offers
+    and draw vote come from the UI. Retreats and builds use Agent.choose."""
 
     def __init__(self, player: Player, persona_name: str = "Opportunist"):
         super().__init__(player, persona_name)
         self.pending_orders: List[Order] = []
-        # deal identity -> accept?  Keyed on what the deal *is* rather than on
-        # the message id, so a counter-offer inherits the answer already given
-        # to the original. (sender, type) alone was not enough: a bilateral
-        # alliance and a three-way pact from the same player share both, and
-        # so do a public and a private version of one, so answering either
-        # silently answered the other.
+        # decision_key(deal) -> accept?, so a counter-offer inherits the answer.
         self.decisions: Dict[tuple, bool] = {}
         self.inbox: List[Message] = []
+        self.draw_vote = False
+
+    def vote_draw(self, state, stalled) -> bool:
+        return self.draw_vote
 
     @staticmethod
     def decision_key(msg: Message) -> tuple:

@@ -28,18 +28,15 @@ export function LogPanel({ history, upto }) {
   const steps = history.slice(0, upto + 1);
   if (!steps.length) return <Empty>Nothing yet.</Empty>;
 
-  const rows = [];
+  const turns = [];
   for (let i = steps.length - 1; i >= 0; i--) {
-    const s = steps[i], t = i + 1;
+    const s = steps[i], rows = [];
     for (const o of s.outcomes ?? []) {
       if (o.kept) continue;
       rows.push(
-        <div className="line bad" key={`b${i}-${rows.length}`}>
-          <span className="t">T{t}</span>
-          <span>
-            ✕ {o.commitment_type} between {o.players.join(" & ")} broken by{" "}
-            <b>{o.broken_by.join(", ")}</b>
-          </span>
+        <div className="line bad" key={`b${rows.length}`}>
+          ✕ {o.commitment_type} between {o.players.join(" & ")} broken by{" "}
+          <b>{o.broken_by.join(", ")}</b>
         </div>
       );
     }
@@ -47,17 +44,18 @@ export function LogPanel({ history, upto }) {
       let cls = "line mut";
       if (/Commitment created/.test(e)) cls = "line good";
       else if (/Pact dissolved/.test(e)) cls = "line bad";
-      else if (/Dislodged|Removal/.test(e)) cls = "line bad";
+      else if (/Dislodged|Removal|Disbanded/.test(e)) cls = "line bad";
       else if (/Move succeeds|Build/.test(e)) cls = "line";
-      rows.push(
-        <div className={cls} key={`l${i}-${rows.length}`}>
-          <span className="t">T{t}</span>
-          <span>{e}</span>
-        </div>
-      );
+      rows.push(<div className={cls} key={`l${rows.length}`}>{e}</div>);
     }
+    turns.push(
+      <section className="log-turn" key={i}>
+        <h6>Turn {i + 1}</h6>
+        {rows}
+      </section>
+    );
   }
-  return <>{rows}</>;
+  return <>{turns}</>;
 }
 
 /* ── Talks ────────────────────────────────────────────────────────── */
@@ -67,42 +65,39 @@ export function TalksPanel({ history, upto }) {
   if (!steps.some((s) => (s.messages ?? []).length))
     return <Empty>No messages yet.</Empty>;
 
-  const cards = [];
+  const turns = [];
   for (let i = steps.length - 1; i >= 0; i--) {
     const s = steps[i];
     if (!(s.messages ?? []).length) continue;
     const accepted = new Set(
       s.messages.filter((m) => m.type === "Accept").map((m) => m.reference_id)
     );
-    cards.push(
-      <div className="card" key={i}>
-        <h4>
-          Turn {i + 1}
-          <span className="tag">{s.messages.length} messages</span>
-        </h4>
+    turns.push(
+      <section className="log-turn" key={i}>
+        <h6>Turn {i + 1} <span>{s.messages.length} messages</span></h6>
         {s.messages.map((m, j) => {
-          let cls = "line mut", note = null;
-          if (m.type === "Accept") cls = "line good";
-          else if (m.type === "Counter") cls = "line warn";
-          else if (m.type === "Threat") cls = "line bad";
-          else if (accepted.has(m.id)) {
-            note = <span className="tag kept">accepted</span>;
-          }
+          const [, from, to, verb, rest] =
+            /^(\S+?)->(\S+) (\w+) ?(.*)$/.exec(m.text) ?? [null, m.sender, "", "", m.text];
           return (
-            <div className={cls} key={j}>
-              <span className="t" style={{ color: COLOR[m.sender] }}>■</span>
-              <span className="mono">
-                {m.text}{" "}
-                {m.coalition && <span className="tag info">pact · {m.coalition.length}</span>}{" "}
-                {m.private && <span className="tag lie">private</span>} {note}
-              </span>
+            <div className={`msg ${(m.type ?? "").toLowerCase()}`} key={j}>
+              <Dot player={m.sender} />
+              <div className="msg-body">
+                <span className="who">{from}<i>→</i>{to}</span>
+                {verb && <span className="verb">{verb.toLowerCase()}</span>}
+                <span className="terms">{rest}</span>
+              </div>
+              <div className="msg-tags">
+                {m.coalition && <span className="tag info">pact · {m.coalition.length}</span>}
+                {m.private && <span className="tag lie">private</span>}
+                {accepted.has(m.id) && <span className="tag kept">accepted</span>}
+              </div>
             </div>
           );
         })}
-      </div>
+      </section>
     );
   }
-  return <>{cards}</>;
+  return <>{turns}</>;
 }
 
 /* ── Deals ────────────────────────────────────────────────────────── */

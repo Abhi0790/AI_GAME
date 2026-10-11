@@ -1,9 +1,9 @@
 import pytest
 from src.common.schemas import (
-    GameState, Order, OrderType, Player, Unit, Commitment, CommitmentType,
+    GameState, Order, OrderType, Player, Commitment, CommitmentType,
     Message, MessageType, message_to_commitment,
 )
-from src.engine.adjudicator import resolve, verify_commitments
+from src.engine.adjudicator import verify_commitments
 from src.engine.runner import GameRunner
 from src.engine.board import players
 

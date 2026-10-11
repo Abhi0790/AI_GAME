@@ -46,9 +46,7 @@ class OutcomeRule(TrustRule):
                     explanation = (f"w = 1 - {LAMBDA_INCENTIVE}x{incentive:.2f} = {w:.2f}: "
                                    f"near-full penalty, the break gained little")
 
-                # Reputation and the specific relationships both move: the
-                # people who were in the deal learn more about this player
-                # than the table does.
+                # Reputation and the pair records both move.
                 model.observe(p, members, c_type, kept=False, discount=w)
                 traces.append(TrustTrace(
                     rule_name, f"{p.value} broke {c_type.value} with {counterparties}",
@@ -64,17 +62,7 @@ class OutcomeRule(TrustRule):
 
 
 class PublicRecordRule(TrustRule):
-    """R5 — the table's evidence: a public deal between two other players.
-
-    The engine publishes the verdict on every non-private commitment, so an
-    agent does not need to be in a deal to see it broken. That is what makes
-    a *reputation* distinct from a relationship: the general record absorbs
-    everything anyone did in the open, while the pair record stays first-hand.
-
-    Without this the two layers were built from identical evidence and the
-    pair record could never disagree with the reputation. A private break is
-    invisible to a third party and so moves nothing here.
-    """
+    """R5: a public deal between two other players moves their reputation only."""
 
     def evaluate(self, model: TrustModel, facts: Dict[str, Any]) -> List[TrustTrace]:
         traces = []

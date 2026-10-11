@@ -5,6 +5,7 @@ import Board from "./components/Board.jsx";
 import Inspector from "./components/Inspector.jsx";
 import Seat, { collectOrders } from "./components/Seat.jsx";
 import ThinkPanel from "./components/Think.jsx";
+import Setup from "./components/Setup.jsx";
 import {
   LogPanel, TalksPanel, DealsPanel, TrustPanel, WhyPanel, CalibPanel, TurnSummary,
 } from "./components/Panels.jsx";
@@ -47,11 +48,12 @@ export default function App() {
   const [choices, setChoices] = useState({});
   const [orders, setOrders] = useState({});
   const [config, setConfig] = useState({
-    seat: "", chaos: "", seed: "", search: "expectiminimax",
+    seat: "", chaos: "", seed: "", search: "expectimax",
     node_budget: 1500, negotiation_rounds: 3, seating: {},
-    n_seats: 4, homes_per_player: 2, outer_rings: 0, max_turns: 12, win_centers: "", win_fraction: 0.6, home_builds: true, fortified_homes: false, sieges: false, erase_reputation: false, order_noise: 0,
+    n_seats: 4, homes_per_player: 2, outer_rings: 0, max_turns: 12, standard_map: false, win_centers: "", win_fraction: 0.6, home_builds: true, fortified_homes: false, sieges: false, draws: false, erase_reputation: false, order_noise: 0,
   });
   const [error, setError] = useState(null);
+  const [setupOpen, setSetupOpen] = useState(false);
   const cancel = useRef(false);
 
   useEffect(() => { api.getBoard().then(setDefaults).catch((e) => setError(String(e))); }, []);
@@ -85,8 +87,8 @@ export default function App() {
 
   // Seats the next game will have, which is what the setup controls act on.
   const setupSeats = useMemo(
-    () => (defaults?.seat_colours ?? []).slice(0, Number(config.n_seats) || 0),
-    [defaults, config.n_seats]);
+    () => (defaults?.seat_colours ?? []).slice(0, config.standard_map ? 7 : Number(config.n_seats) || 0),
+    [defaults, config.n_seats, config.standard_map]);
 
   const live = viewing >= history.length - 1;
   const step = history[viewing];
@@ -134,6 +136,7 @@ export default function App() {
         negotiation_rounds: Number(config.negotiation_rounds),
         human_seat: config.seat || null,
         chaos_seat: config.chaos || null,
+        map: config.standard_map ? "standard" : "ring",
         n_seats: Number(config.n_seats),
         homes_per_player: Number(config.homes_per_player),
         outer_rings: Number(config.outer_rings),
@@ -143,6 +146,7 @@ export default function App() {
         home_builds: config.home_builds,
         fortified_homes: config.fortified_homes,
         sieges: config.sieges,
+        draws: config.draws,
         erase_reputation: config.erase_reputation,
         knobs: Number(config.order_noise) > 0 ? { ORDER_NOISE: Number(config.order_noise) } : {},
       });
@@ -161,7 +165,7 @@ export default function App() {
     if (!game || game.finished) return true;
     try {
       const payload = game.human_seat
-        ? { orders: collectOrders(pending, orders), decisions: choices }
+        ? { orders: collectOrders(pending, orders), decisions: choices, draw: !!choices.__draw__ }
         : { orders: [], decisions: {} };
       const d = await api.stepGame(game.id, payload);
       const g = { ...game, ...d };
@@ -194,7 +198,7 @@ export default function App() {
   useEffect(() => {
     const onKey = (e) => {
       const tag = e.target?.tagName;
-      if (tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA") return;
+      if (setupOpen || tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA") return;
       if (e.key === "ArrowLeft" && viewing > 0) setViewing(viewing - 1);
       if (e.key === "ArrowRight" && viewing < history.length - 1) setViewing(viewing + 1);
       if (e.key === " " && game && !game.finished && !running) {
@@ -204,7 +208,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [viewing, history.length, game, running, step1]);
+  }, [viewing, history.length, game, running, step1, setupOpen]);
 
   const status = !game ? "no game"
     : game.finished ? (game.winner ? `${game.winner} wins` : "finished")
@@ -212,153 +216,58 @@ export default function App() {
 
   return (
     <div className="app">
-      <header>
-        <h1>Territory <span>· negotiating agents that keep, and break, their word</span></h1>
-        <span className={`pill ${!game ? "" : game.finished ? "done" : "live"}`}>{status}</span>
+      <header className="topbar">
+        <div className="brand"><span className="logo" />Territory</div>
         {game && (
-          <span className="pill">
-            turn {Math.min(game.turn, game.max_turns)}/{game.max_turns} ·{" "}
-            {game.win_centers} centres to win
-          </span>
+          <div className="meta" title={summarise(game.config)}>
+            <span className={`status ${game.finished ? "done" : "live"}`}>{status}</span>
+            <span>Turn <b>{Math.min(game.turn, game.max_turns)}</b> / {game.max_turns}</span>
+            <span className="sep" />
+            <span><b>{game.win_centers}</b> centres to win</span>
+            <span className="sep" />
+            <span className="seed">seed {game.config.seed}</span>
+          </div>
         )}
-        {game && <span className="pill" title={JSON.stringify(game.config)}>{summarise(game.config)}</span>}
-        {detail && <span className="pill on">detailed mode</span>}
-        {verbose && <span className="pill on">verbose</span>}
+        {replay && !game && <div className="meta"><span className="status">replay</span></div>}
         <div className="spacer" />
-        <div className="ctl">
-          <label htmlFor="replay">replay</label>
-          <select id="replay" value={replay?.name ?? ""}
-                  onChange={(e) => openReplay(e.target.value)}>
-            <option value="">live game</option>
-            {replays.map((r) => (
-              <option key={r.name} value={r.name}>
-                {r.name.replace(/\.json$/, "")} · {r.seats} seats · {r.turns}t
-              </option>
-            ))}
-          </select>
-          <label title="Replay each turn the way every agent went through it">
-            <input type="checkbox" checked={verbose}
-                   onChange={(e) => {
-                     setVerbose(e.target.checked);
-                     setTab(e.target.checked ? "think" : "log");
-                   }} />
-            {" "}verbose
-          </label>
-        </div>
-        <div className="ctl">
-          <button className="primary" onClick={newGame}>New game</button>
-          <button disabled={!game || game.finished || running} onClick={step1}>Step</button>
-          <button disabled={!game || game.finished || running} onClick={runAll}>Run all</button>
-          {running && <button onClick={() => { cancel.current = true; }}>Stop</button>}
-          <button disabled={!game || !history.length}
-                  onClick={() => api.saveReplay(game.id).catch((e) => setError(String(e)))}>
-            Save replay
-          </button>
-        </div>
-        <details className="setup" open={!game && !replay}>
-          <summary>Game setup <span>applies to the next New game</span></summary>
-        <div className="ctl">
-          <label htmlFor="seed">seed</label>
-          <input id="seed" type="number" className="sm" placeholder="random"
-                 value={config.seed}
-                 onChange={(e) => setConfig({ ...config, seed: e.target.value })} />
-          <label htmlFor="seats">seats</label>
-          <input id="seats" type="number" className="sm" min="2"
-                 max={(defaults?.seat_colours ?? []).length || 8}
-                 value={config.n_seats}
-                 onChange={(e) => setConfig({ ...config, n_seats: e.target.value })} />
-          <label htmlFor="homes" title="Home centres per seat; one unit starts on each.">homes</label>
-          <input id="homes" type="number" className="sm" min="1"
-                 value={config.homes_per_player}
-                 onChange={(e) => setConfig({ ...config, homes_per_player: e.target.value })} />
-          <label htmlFor="outer_rings" title="Rings of neutral supply centres outside the home ring, one centre per home centre each.">outer rings</label>
-          <input id="outer_rings" type="number" className="sm" min="0" max="5"
-                 value={config.outer_rings}
-                 onChange={(e) => setConfig({ ...config, outer_rings: e.target.value })} />
-          <label htmlFor="max_turns">turns</label>
-          <input id="max_turns" type="number" className="sm" min="1"
-                 value={config.max_turns}
-                 onChange={(e) => setConfig({ ...config, max_turns: e.target.value })} />
-          <label htmlFor="win_centers" title="Centres needed to win outright. Blank uses the win share of the board.">win</label>
-          <input id="win_centers" type="number" className="sm" min="1"
-                 placeholder="auto" value={config.win_centers}
-                 onChange={(e) => setConfig({ ...config, win_centers: e.target.value })} />
-          <label htmlFor="win_fraction" title="Share of the board's centres that wins when no threshold is given.">win share</label>
-          <input id="win_fraction" type="number" className="sm" min="0.05" max="1" step="0.05"
-                 value={config.win_fraction}
-                 onChange={(e) => setConfig({ ...config, win_fraction: e.target.value })} />
-          <label htmlFor="home_builds" title="Build new units only on your own home centres, as in standard Diplomacy. Off: build on any centre you own.">home builds</label>
-          <input id="home_builds" type="checkbox" checked={config.home_builds}
-                 onChange={(e) => setConfig({ ...config, home_builds: e.target.checked })} />
-          <label htmlFor="fortified_homes" title="Home centres defend at +1, so taking one needs two supports.">forts</label>
-          <input id="fortified_homes" type="checkbox" checked={config.fortified_homes}
-                 onChange={(e) => setConfig({ ...config, fortified_homes: e.target.checked })} />
-          <label htmlFor="sieges" title="A centre changes hands only if the unit was already on it after spring.">sieges</label>
-          <input id="sieges" type="checkbox" checked={config.sieges}
-                 onChange={(e) => setConfig({ ...config, sieges: e.target.checked })} />
-          <label htmlFor="erase_reputation" title="Start with no memory of earlier games. Unticked, every persona remembers what it learned about the others in the last game.">erase reputation</label>
-          <input id="erase_reputation" type="checkbox" checked={config.erase_reputation}
-                 onChange={(e) => setConfig({ ...config, erase_reputation: e.target.checked })} />
-          <label htmlFor="order_noise" title="Chance each order is lost and the unit holds instead. A lost promised order counts as broken.">noise</label>
-          <input id="order_noise" type="number" className="sm" min="0" max="1" step="0.05"
-                 value={config.order_noise}
-                 onChange={(e) => setConfig({ ...config, order_noise: e.target.value })} />
-          {setupSeats.map((p) => (
-            <React.Fragment key={p}>
-              <label htmlFor={`persona-${p}`}>{p}</label>
-              <select id={`persona-${p}`} value={config.seating[p] ?? ""}
-                      onChange={(e) => setConfig({
-                        ...config,
-                        seating: { ...config.seating, [p]: e.target.value },
-                      })}>
-                <option value="">auto</option>
-                {(board?.personas ?? []).map((n) => (
-                  <option key={n} value={n}>{n}</option>
-                ))}
-              </select>
-            </React.Fragment>
+        <select className="quiet" aria-label="Replay" value={replay?.name ?? ""}
+                onChange={(e) => openReplay(e.target.value)}>
+          <option value="">Live game</option>
+          {replays.map((r) => (
+            <option key={r.name} value={r.name}>
+              {r.name.replace(/\.json$/, "")} · {r.seats} seats · {r.turns}t
+            </option>
           ))}
+        </select>
+        <label className="toggle" title="Replay each turn the way every agent went through it">
+          <input type="checkbox" role="switch" checked={verbose}
+                 onChange={(e) => {
+                   setVerbose(e.target.checked);
+                   setTab(e.target.checked ? "think" : "log");
+                 }} />
+          <span>Agent replay</span>
+        </label>
+        <div className="group">
+          <button disabled={!game || game.finished || running} onClick={step1}
+                  title="Play one turn (space)">Step</button>
+          {running
+            ? <button onClick={() => { cancel.current = true; }}>Stop</button>
+            : <button disabled={!game || game.finished} onClick={runAll}>Run all</button>}
         </div>
-        <div className="ctl">
-          <label htmlFor="search">search</label>
-          <select id="search" value={config.search}
-                  onChange={(e) => setConfig({ ...config, search: e.target.value })}>
-            <option value="expectiminimax">expectiminimax</option>
-            <option value="mcts">mcts</option>
-          </select>
-          <label htmlFor="budget">nodes</label>
-          <input id="budget" type="number" className="sm" min={50} step={50}
-                 value={config.node_budget}
-                 onChange={(e) => setConfig({ ...config, node_budget: e.target.value })} />
-          <label htmlFor="rounds">rounds</label>
-          <input id="rounds" type="number" className="sm" min={1} max={6}
-                 value={config.negotiation_rounds}
-                 onChange={(e) => setConfig({ ...config, negotiation_rounds: e.target.value })} />
-        </div>
-        <div className="ctl">
-          <label htmlFor="seat">seat</label>
-          <select id="seat" value={config.seat}
-                  onChange={(e) => setConfig({ ...config, seat: e.target.value })}>
-            <option value="">spectate</option>
-            {setupSeats.map((p) => (
-              <option key={p} value={p}>play {p}</option>
-            ))}
-          </select>
-          <label htmlFor="chaos">chaos</label>
-          <select id="chaos" value={config.chaos}
-                  onChange={(e) => setConfig({ ...config, chaos: e.target.value })}>
-            <option value="">none</option>
-            {setupSeats.map((p) => (
-              <option key={p} value={p}>{p}</option>
-            ))}
-          </select>
-        </div>
-        </details>
+        <button className="ghost" disabled={!game || !history.length}
+                onClick={() => api.saveReplay(game.id).catch((e) => setError(String(e)))}>
+          Save
+        </button>
+        <button className="primary" onClick={() => setSetupOpen(true)}>New game</button>
       </header>
+      <Setup open={setupOpen} onClose={() => setSetupOpen(false)}
+             onStart={() => { setSetupOpen(false); newGame(); }}
+             config={config} setConfig={setConfig} defaults={defaults} seats={setupSeats} />
 
       {error && (
-        <div className="line bad" style={{ padding: "6px 18px" }}>
+        <div className="banner" role="alert">
           <span>{error}</span>
+          <button className="ghost" onClick={() => setError(null)} aria-label="Dismiss">✕</button>
         </div>
       )}
 
@@ -367,12 +276,12 @@ export default function App() {
           {!game && !replay && (
             <div className="intro">
               <h2>Four agents negotiate, promise and sometimes betray each other.</h2>
-              <ol>
-                <li>Press <b>New game</b>. Setup is optional: leave it blank for a random seed.</li>
-                <li><b>Step</b> plays one turn (or press space); <b>Run all</b> plays to the end.</li>
-                <li>Drag the turn slider or use ← → to go back over past turns.</li>
-                <li>Click a player's card to open its internals: what it believed, priced and chose.</li>
-              </ol>
+              <p>Step through turns, scrub back with ← →, and open any player to see what it
+                believed, priced and chose.</p>
+              <div className="intro-actions">
+                <button className="primary" onClick={newGame}>Quick start</button>
+                <button onClick={() => setSetupOpen(true)}>Configure…</button>
+              </div>
             </div>
           )}
           <Board board={board} state={shown} step={step} />
@@ -417,7 +326,7 @@ export default function App() {
 
           <div className="scrub">
             <span className="lbl">
-              turn {history.length ? viewing + 1 : "—"} / {history.length || "—"}
+              Turn {history.length ? viewing + 1 : "—"} of {history.length || "—"}
             </span>
             <input type="range" min={0} max={Math.max(0, history.length - 1)}
                    value={Math.max(0, viewing)} disabled={history.length < 2}
@@ -431,7 +340,8 @@ export default function App() {
           {game?.human_seat && !game.finished && (
             <Seat seat={game.human_seat} turn={game.turn} pending={pending}
                   choices={choices} setChoices={setChoices}
-                  orders={orders} setOrders={setOrders} />
+                  orders={orders} setOrders={setOrders}
+                  draws={game.config?.draws} />
           )}
         </section>
 

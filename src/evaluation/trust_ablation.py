@@ -4,7 +4,7 @@ import random
 from typing import Optional
 
 from src.common.config import GameConfig, PERSONA_ORDER
-from src.common.schemas import MessageType, Player, leaders
+from src.common.schemas import MessageType, Player
 from src.evaluation.metrics import brier_score, final_scores, obligations
 from src.harness import play_many
 
@@ -25,7 +25,7 @@ def _training_result(cfg: GameConfig, runner):
 def _game_result(cfg: GameConfig, runner):
     seat = variant_seat(cfg.seed, cfg.make_board().players)
     scores = final_scores(runner.state)
-    ahead = leaders(scores)
+    ahead = runner.leaders()
     duties = [broke for step in runner.history
               for (player, _partner), broke in obligations(step).items()
               if player == seat]

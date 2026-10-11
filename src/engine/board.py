@@ -8,17 +8,14 @@ is `ring_board(4)`, which reproduces the original 12-territory map.
     N1 between R2 and B1        C1 between B2 and G1
     N2 between G2 and Y1        C2 between Y2 and R1
 
-`_check` verifies the map is symmetric and the adjudicator is equivariant under
-that symmetry. It does not establish that seats win equally often: measured over
-60 games with identical personas, the {Blue, Gold} positions finish ~0.45
-centres ahead of {Red, Green}. That asymmetry is in the agent layer.
+`_check` verifies the map is symmetric and the adjudicator equivariant under it.
 """
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from math import cos, pi, sin
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
-from src.common.schemas import Player
+from src.common.schemas import Player, Unit, UnitType
 
 # Gold takes Y because Green already has G.
 SEAT_CODES = {
@@ -45,12 +42,7 @@ OUTER_RING_LETTERS = "XZWVU"
 
 @dataclass(frozen=True)
 class Board:
-    """One map, one set of seats, one victory condition, as plain data.
-
-    Frozen: `_centre_set` and `fingerprint` are derived once at construction,
-    and the fingerprint keys the order-set cache, so a board edited in place
-    would serve stale legal moves. Build a new Board instead.
-    """
+    """One map, one set of seats, one victory condition, as plain frozen data."""
     adjacency: Dict[str, List[str]]
     supply_centers: List[str]
     home_centers: Dict[Player, List[str]]      # seat -> where its units start
@@ -69,6 +61,14 @@ class Board:
     # Territory permutations carrying the board onto itself. Empty means
     # symmetry is not claimed.
     symmetries: List[Dict[str, str]] = field(default_factory=list)
+    # Land province -> where an army can step. Empty: armies use `adjacency`
+    # and every territory is land.
+    army_adjacency: Dict[str, List[str]] = field(default_factory=dict)
+    # Location ("Spa/nc" on a split coast, else the province) -> where a fleet
+    # can step. Empty: the board has no fleets.
+    fleet_adjacency: Dict[str, List[str]] = field(default_factory=dict)
+    # Locations where a seat starts with a fleet; its other homes start armies.
+    start_fleets: List[str] = field(default_factory=list)
 
     def __post_init__(self):
         put = object.__setattr__
@@ -77,6 +77,8 @@ class Board:
         put(self, "positions", {t: tuple(xy) for t, xy in self.positions.items()})
         put(self, "_centre_set", set(self.supply_centers))
         put(self, "_fortress_set", set(self.fortresses))
+        put(self, "army_adjacency", {t: list(n) for t, n in self.army_adjacency.items()})
+        put(self, "fleet_adjacency", {t: list(n) for t, n in self.fleet_adjacency.items()})
         # Identifies the map for caches keyed on more than unit placement.
         put(self, "fingerprint", hash(tuple(sorted(
             (t, tuple(n)) for t, n in self.adjacency.items()))))
@@ -103,7 +105,18 @@ class Board:
             "fortresses": list(self.fortresses),
             "positions": {t: list(xy) for t, xy in self.positions.items()},
             "symmetries": [dict(s) for s in self.symmetries],
+            "army_adjacency": {t: list(n) for t, n in self.army_adjacency.items()},
+            "fleet_adjacency": {t: list(n) for t, n in self.fleet_adjacency.items()},
+            "start_fleets": list(self.start_fleets),
         }
+
+    def starting_units(self) -> List[Unit]:
+        """One unit per home centre: a fleet where `start_fleets` says, else an army."""
+        fleets = {province(loc): loc for loc in self.start_fleets}
+        return [Unit(player=p, territory=t, unit_type=UnitType.FLEET,
+                     coast=fleets[t].partition("/")[2] or None) if t in fleets
+                else Unit(player=p, territory=t)
+                for p, homes in self.home_centers.items() for t in homes]
 
     @classmethod
     def from_dict(cls, d: dict) -> "Board":
@@ -121,10 +134,7 @@ def _check(b: Board) -> None:
             assert n in names, f"{t} -> {n} is not a territory"
             assert t in b.adjacency[n], f"{t} -> {n} is not mutual"
 
-    # A disconnected board is two independent games: seats in one component can
-    # never reach the other, so nobody there can be attacked or eliminated.
-    # Homes need not be connected to each other -- a split seat is a legitimate
-    # setup, and one that cannot support its own units.
+    # The board must be connected; a seat's homes need not be.
     seen_terr, frontier = {next(iter(names))}, [next(iter(names))]
     while frontier:
         for n in b.adjacency[frontier.pop()]:
@@ -166,14 +176,18 @@ def _check(b: Board) -> None:
     if b.symmetries:
         _check_fairness(b, names, centres)
 
+    for graph, label in ((b.army_adjacency, "army"), (b.fleet_adjacency, "fleet")):
+        for loc, neighbours in graph.items():
+            for n in neighbours:
+                assert loc in graph.get(n, []), f"{label} move {loc} -> {n} is not mutual"
+                assert province(n) in b.adjacency[province(loc)], (
+                    f"{label} move {loc} -> {n} is not in the adjacency")
+    for loc in b.start_fleets:
+        assert loc in b.fleet_adjacency, f"a fleet cannot start on {loc}"
+
 
 def _check_fairness(b: Board, names: set, centres: set) -> None:
-    """Check the seat positions are interchangeable.
-
-    A statement about the graph, not about outcomes: neighbour sets are
-    compared, and passing says nothing about the planner. Not evidence that a
-    seat-keyed table is unbiased.
-    """
+    """Check the seat positions are interchangeable in the graph."""
     home_of = {t: p for p, homes in b.home_centers.items() for t in homes}
     moves: List[Dict[Player, Player]] = []
     for i, sigma in enumerate(b.symmetries):
@@ -232,22 +246,11 @@ def ring_board(seats: int | Sequence[Player] = DEFAULT_SEATS,
     between neighbouring seats gets one middle territory, and those form a ring
     of their own.
 
-    `gap_centres` decides what the middle is made of, and every seat must face
-    the same thing or `_check` rejects the board:
+    `gap_centres`: None alternates centre/corridor (all centres for odd seat
+    counts), True makes every middle territory a centre, False a corridor.
 
-        None   alternate centre/corridor when the seat count is even, all
-               centres when it is odd (the alternation cannot close otherwise)
-        True   every middle territory is a neutral supply centre
-        False  every middle territory is a plain corridor
-
-    The default makes the contested pool jump with seat parity, which
-    confounds any comparison across table sizes; pass True or False to hold it
-    fixed instead.
-
-    `outer_rings` adds that many rings of neutral supply centres outside the
-    home ring, one per home slot (X1.., then Z1.., ...). Each outer territory
-    touches its ring neighbours and the territory directly inside it, so the
-    board stays symmetric and every seat gets the same extra land.
+    `outer_rings` adds rings of neutral supply centres outside the home ring,
+    each territory touching its ring neighbours and the one inside it.
 
     `fortified_homes` makes every home centre a fortress.
     """
@@ -442,3 +445,58 @@ def fortress_bonus(territory: str) -> int:
 
 def get_supply_centers() -> List[str]:
     return list(_ACTIVE.supply_centers)
+
+
+def province(location: str) -> str:
+    """The province of a location: "Spa/nc" -> "Spa"."""
+    return location.partition("/")[0]
+
+
+def has_fleets() -> bool:
+    return bool(_ACTIVE.fleet_adjacency)
+
+
+def is_land(territory: str) -> bool:
+    return not _ACTIVE.army_adjacency or territory in _ACTIVE.army_adjacency
+
+
+def unit_moves(unit: Unit) -> List[str]:
+    """Locations a unit can step to without a convoy."""
+    if unit.unit_type == UnitType.FLEET:
+        return _ACTIVE.fleet_adjacency.get(unit.location, [])
+    return (_ACTIVE.army_adjacency or _ACTIVE.adjacency).get(unit.territory, [])
+
+
+def can_reach(unit: Unit, territory: str) -> bool:
+    """Can the unit step into this province (any coast) without a convoy?"""
+    return any(province(loc) == territory for loc in unit_moves(unit))
+
+
+def convoy_reach(origin: str, seas: Set[str]) -> Set[str]:
+    """Land an army at `origin` can reach through a chain of these seas."""
+    if not _ACTIVE.army_adjacency or origin not in _ACTIVE.army_adjacency:
+        return set()
+    adj = _ACTIVE.adjacency
+    reached = {s for s in adj[origin] if s in seas}
+    frontier = list(reached)
+    while frontier:
+        for n in adj[frontier.pop()]:
+            if n in seas and n not in reached:
+                reached.add(n)
+                frontier.append(n)
+    return {n for s in reached for n in adj[s] if n != origin and is_land(n)}
+
+
+def build_options(territory: str) -> List[str]:
+    """What can be built on a centre: "Bre" for an army, "F Bre" or "F StP/nc" for a fleet."""
+    fleets = [f"F {loc}" for loc in _ACTIVE.fleet_adjacency if province(loc) == territory]
+    return ([territory] if is_land(territory) else []) + fleets
+
+
+def built_unit(player: Player, option: str) -> Unit:
+    """The unit a build option makes."""
+    if option.startswith("F "):
+        loc = option[2:]
+        return Unit(player=player, territory=province(loc), unit_type=UnitType.FLEET,
+                    coast=loc.partition("/")[2] or None)
+    return Unit(player=player, territory=option)

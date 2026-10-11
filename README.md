@@ -31,7 +31,7 @@ docker run --rm territory-sim scripts/run_headless.py --seed 7
 ```
 
 The tool images take a script path as their argument (`ENTRYPOINT` is
-`python`), so `docker run --rm territory-report scripts/run_sweep.py --seeds 5`
+`python`), so `docker run --rm territory-report scripts/run_sweep.py --games 5`
 works — not `... python scripts/...`.
 
 ## Setup without Docker
@@ -51,17 +51,26 @@ npm --prefix web run build           # FastAPI serves the build from web/dist
 python -m src.ui.app                         # dashboard on http://localhost:8000
 npm --prefix web run dev                     # or Vite on :5173, proxying the API
 python scripts/demo.py                       # betrayal demo, arithmetic printed
-python scripts/run_headless.py --seed 42     # one game, no UI
+python scripts/run_headless.py               # one game, no UI
 python scripts/play.py --seat Red            # play a seat in the terminal
-python scripts/run_analysis.py --games 20    # metrics per persona, with CIs
-python scripts/run_calibration.py --games 20 # held-out-policy trust calibration
-python scripts/run_trust_ablation.py --games 24 --train-games 24 # paired trust forecast experiment
-python scripts/run_keep_coverage.py --games 96 --budget 400 # keeping-candidate experiment
-python scripts/run_tournament.py --games 20  # multi-game tournament
-python scripts/make_figures.py --games 20    # report figures -> figures/
-python scripts/run_sweep.py --seeds 20       # sweep the knobs -> data/sweep.json
+python scripts/run_analysis.py               # metrics per persona, with CIs
+python scripts/run_calibration.py            # held-out-policy trust calibration
+python scripts/run_trust_ablation.py         # paired trust forecast experiment
+python scripts/run_keep_coverage.py          # keeping-candidate experiment
+python scripts/run_tournament.py             # multi-game tournament
+python scripts/make_figures.py               # report figures -> figures/
+python scripts/run_sweep.py                  # sweep the knobs -> data/sweep.json
 pytest tests/ -q
 ```
+
+Every script that plays games takes the same game flags: the board
+(`--standard`, `--seats`, `--homes`, `--outer-rings`, `--turns`,
+`--win-centers`, `--win-fraction`, `--build-anywhere`, `--forts`, `--sieges`,
+`--draws`) and the agents (`--search expectimax|mcts|regret`, `--budget`,
+`--knob NAME=VALUE`). Multi-game scripts play `--games 60` by default, a
+multiple of the 12-seed seating cycle and about the fewest that separates
+settings; the full sweep is 108 cells of that, so pass `--games 20` for a quicker
+one.
 
 The trust ablation fits a constant keep forecast on separate training games,
 then compares it with the learned forecast in paired test games. It writes a
@@ -80,7 +89,7 @@ any tuning constant can be overridden by name:
 
 ```bash
 python scripts/run_headless.py --seed 42 --knob FORFEIT_WEIGHT=0
-python scripts/run_sweep.py --seeds 20 --axes LAMBDA_INCENTIVE=0.2,0.6
+python scripts/run_sweep.py --games 20 --axes LAMBDA_INCENTIVE=0.2,0.6
 ```
 
 Multi-game scripts (analysis, tournament, figures, sweep) play games in parallel
@@ -114,6 +123,7 @@ src/
   harness.py                      play(cfg) - the one way a game is built
   engine/
     board.py                      Board + ring_board(n) - map, seats, win condition
+    standard_map.py               the 7-power map with fleets, coasts and seas
     orders.py                     legal order enumeration
     adjudicator.py                simultaneous resolution, commitment grading
     runner.py                     step() - the turn loop
@@ -123,7 +133,8 @@ src/
     chaos.py                      ChaosAgent - six misbehaviour modes
     trust/model.py                Beta records, P(keeps) network
     trust/rules.py                rule base R0-R2, R5
-    planner/planner.py            expectiminimax, MCTS, pruning, pricing
+    planner/planner.py            expectimax, MCTS, regret matching, pruning, pricing
+    planner/regret.py             RM+ solver for one simultaneous-move turn
     negotiation/strategy.py       deal valuation, proposals, replies
     negotiation/personas.py       four personas
     opponent_model/               per-opponent move statistics
@@ -151,16 +162,39 @@ Dockerfile                        four images: web, sim, test, report
 By default: 12 territories, 10 supply centres, 4 players, 2 units each. Orders
 are move, support move, support hold and hold, submitted simultaneously. Attack
 strength is 1 plus supports and must strictly exceed the defence; equal strength
-bounces and supports can be cut. Odd turns are spring, even turns autumn, when
-centres change hands and units are built or removed. New units go only on the
-player's own empty home centres, as in standard Diplomacy; `--build-anywhere`
-(or unticking the dashboard's "home builds" box) allows any owned centre. A
-game ends when someone holds 6 centres, or after 12 turns.
+bounces and supports can be cut, though not by an attack from the supporter's
+own side. A dislodged unit retreats to an adjacent empty square that is not
+where its attacker came from or a square left empty by a bounce; with nowhere
+to go, or when two units retreat to the same square, it disbands. Odd turns
+are spring, even turns autumn, when centres change hands and each player
+chooses where to build (it may waive a build) and which units to disband.
+New units go only on the player's own empty home centres, as in standard
+Diplomacy; `--build-anywhere` (or unticking the dashboard's "home builds" box)
+allows any owned centre. A game ends when someone holds 6 centres, or after
+12 turns. With `--draws` (the dashboard's "draws") the survivors can also end
+it early by a unanimous draw vote, shared equally among them; an agent votes
+for one after four turns without a centre changing hands, unless it leads alone.
+
+The ring board has armies only: every square is land. `--standard` (the
+dashboard's "standard map") plays the real 7-power map instead: 75 provinces,
+34 centres, 19 seas, 18 centres to win. Austria is Red, England Blue, France
+Teal, Germany Orange, Italy Green, Russia Purple, Turkey Gold. It adds fleets,
+the split coasts of Spain, St Petersburg and Bulgaria, and convoys: an army
+crosses water when a chain of its convoying fleets reaches the far shore, and
+stays put if one of them is dislodged. A convoyed army never fights a head-to-head
+and does not cut a support aimed at its own convoying fleet. Builds offer an
+army or a fleet on each coastal home centre. Agents only consider moving an
+army by sea together with their own fleet ordered to carry it. `--seats`,
+`--homes` and `--outer-rings` apply to the ring only.
+
+```bash
+python scripts/run_headless.py --standard --turns 20 --budget 300
+```
 
 None of those numbers are fixed. Every script takes `--seats` (2–8), `--homes`
 (home centres, and so units, per player), `--win-centers`, `--win-fraction` (the
 share of the board's centres that wins when `--win-centers` is not given, 0.6 by
-default) and `--max-turns`, and
+default) and `--turns`, and
 the dashboard has the same controls; the map is generated to match and is proved
 symmetric before it is played on. The default is exactly the board above.
 
@@ -169,11 +203,11 @@ supply centres outside the home ring, one per home centre each, for a larger
 map with more to fight over: 4 seats and 2 rings is 26 centres instead of 10.
 
 ```bash
-python scripts/run_headless.py --seats 6 --outer-rings 2 --max-turns 20
+python scripts/run_headless.py --seats 6 --outer-rings 2 --turns 20
 python scripts/play.py --seat Purple --seats 6
 ```
 
-`--fortified-homes` (the dashboard's "forts") makes every home centre defend at
+`--forts` (the dashboard's "forts") makes every home centre defend at
 +1, so taking one needs two supports instead of one. `--knob ORDER_NOISE=0.1`
 (the dashboard's "noise") loses each order with that probability and holds the
 unit instead; promises are graded on what was executed, so a lost support reads
@@ -197,7 +231,10 @@ type and a "keeps when tempted" record, which is what separates personas:
 everyone keeps 93-97% of promises that cost nothing, but when breaking pays
 Honest keeps 0.90 and the Opportunist 0.58. Within one game there is too
 little of that evidence to learn from; carried across games, predictions
-beat the base rate from the second game on.
+beat the base rate from the second game on. A game whose reputation carries
+forward (every game of a series but the last, and dashboard games) charges a
+broken promise its full reputation cost to the end, instead of letting it
+fall to zero on the last turn.
 
 For a map that is not a ring, pass `GameConfig(board=...)` an explicit
 `Board.to_dict()` — see `tests/test_board_config.py`.
@@ -205,4 +242,37 @@ For a map that is not a ring, pass `GameConfig(board=...)` an explicit
 Promises come in four kinds — alliance, DMZ, support, and an exchange whose
 two legs fall due on different turns. Any of them can be private, and an
 alliance can bind three players as a single pact that forms only if everyone
-signs and dissolves the moment one member breaks it.
+signs and dissolves the moment one member breaks it. An exchange is the
+conditional promise: if the support is not given, the deal dissolves and the
+repayment is never owed.
+
+After the deals are struck, each agent may state an intended move to everyone
+(`INTENT`). It binds nobody; it is graded on the executed orders, each listener
+keeps a candour record of the speaker, and its opponent model expects the
+announced move with that probability. Going back on an announcement costs the
+speaker `INTENT_COST` times its reputation coefficient, so Honest rarely does.
+
+Agents also keep second-order beliefs: what each other player has seen of
+them, replayed through that player's own update rules. An agent does not offer
+deals to a player it expects to refuse it, and among the deals it does offer it
+ranks by the Nash bargaining product of its own surplus and the partner's,
+priced from the partner's seat with its standing in their eyes as P(keeps).
+The same product picks a counter-offer, out of every shorter term and every
+DMZ one square smaller, and picks a pact's two allies, multiplying all three
+members' surpluses; a version anyone would refuse is not offered.
+
+## Search
+
+`--search` picks how each agent chooses orders, at the same adjudication budget:
+
+- `expectimax` (default): depth-2 expectimax against sampled opponents.
+- `mcts`: UCT over the same candidates with one random rollout ply.
+- `regret`: solves the turn as a simultaneous-move game. RM+ runs over a few
+  candidate order sets per seat, opponents scoring positions from their own
+  seats and anchored toward the opponent model, and the agent plays a draw
+  from its average strategy. The trace reports that mixed strategy and its
+  exploitability gap.
+
+At the root of every search the opponent model is level-1: each opponent order
+set is weighted by its move-frequency prior times `exp(LEVEL1_BETA x value)`,
+the value being what that set is worth from the opponent's own seat.

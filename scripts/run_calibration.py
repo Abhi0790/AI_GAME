@@ -7,25 +7,25 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.common.config import GameConfig, add_board_args, board_kwargs
+from src.common.config import GameConfig, add_game_args, game_kwargs, DEFAULT_GAMES
 from src.evaluation.fixed_policy import play_fixed, summarise
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--games", type=int, default=20)
+    parser.add_argument("--games", type=int, default=DEFAULT_GAMES)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", default="data/fixed_policy_calibration.json")
-    add_board_args(parser)
+    add_game_args(parser)
     args = parser.parse_args()
     if args.games < 2:
         parser.error("at least two games are needed for a held-out base rate")
 
     seeds = list(range(args.seed, args.seed + args.games))
-    games = [play_fixed(GameConfig(seed=s, **board_kwargs(args))).calibration
+    games = [play_fixed(GameConfig(seed=s, **game_kwargs(args))).calibration
              for s in seeds]
     result = summarise(games, seeds)
-    result["config"] = GameConfig(seed=args.seed, **board_kwargs(args)).to_dict()
+    result["config"] = GameConfig(seed=args.seed, **game_kwargs(args)).to_dict()
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as stream:
         json.dump(result, stream, indent=2)

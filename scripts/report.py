@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.evaluation.metrics import MIN_GAMES
+from src.common.config import DEFAULT_GAMES
 
 
 def provenance() -> dict:
@@ -36,11 +37,8 @@ def provenance() -> dict:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--games", type=int, default=MIN_GAMES)
-    ap.add_argument("--games-per-cell", type=int, default=None,
-                    help="games behind each search x budget cell (default: --games)")
-    ap.add_argument("--seeds", type=int, default=MIN_GAMES,
-                    help="games per sweep cell")
+    ap.add_argument("--games", type=int, default=DEFAULT_GAMES,
+                    help="games per figure, per search x budget cell and per sweep cell")
     ap.add_argument("--out", default="figures")
     ap.add_argument("--data", default="data")
     ap.add_argument("--skip-sweep", action="store_true")
@@ -58,12 +56,12 @@ def main():
 
     sweep_path = os.path.join(args.data, "sweep.json")
     steps = [([sys.executable, "scripts/make_figures.py",
-               "--games", str(args.games), "--games-per-cell",
-               str(args.games_per_cell or args.games), "--out", args.out],
+               "--games", str(args.games), "--games-per-cell", str(args.games),
+               "--out", args.out],
               os.path.join(args.out, "summary.json"))]
     if not args.skip_sweep:
         steps.append(([sys.executable, "scripts/run_sweep.py",
-                       "--seeds", str(args.seeds), "--out", sweep_path],
+                       "--games", str(args.games), "--out", sweep_path],
                       sweep_path))
 
     produced = []

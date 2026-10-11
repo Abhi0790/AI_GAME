@@ -9,26 +9,27 @@ from src.engine.board import (
     is_supply_center, get_adjacent, max_turns, players, win_centers, home_centers, sieges,
 )
 from src.agents.trust.model import TrustModel, break_weight
+from src.agents.planner.regret import regret_matching, exploitability
 import math
 import random
 
 
 class PlannerConfig:
-    """Search budget and the one persona knob the planner reads.
+    """Search budget (in adjudications) and the persona knobs the planner reads.
 
-    Depth-2 expectiminimax over a pruned candidate set, with every call to the
-    adjudicator counted. The budget is in adjudications, not seconds, so the
-    MCTS variant can be given exactly the same one.
+    "expectimax" searches to depth 2 against sampled opponents.
     """
 
     def __init__(self, reputation_cost_coefficient: float = 1.0, depth: int = 2,
                  opponent_samples: int = 32, beam_width: int = 8,
                  depth2_candidates: int = 4, depth2_samples: int = 6,
                  depth2_replies: int = 6, node_budget: int = 1500,
-                 vengeance: float = 0.0, search: str = "expectiminimax",
+                 vengeance: float = 0.0, search: str = "expectimax",
                  retaliation_samples: int = 1,
                  trace_coverage: bool = False,
-                 reserve_keep_candidate: bool = False):
+                 reserve_keep_candidate: bool = False,
+                 regret_candidates: int = 6, regret_anchor: float = 0.3,
+                 regret_iterations: int = 300, reputation_carries: bool = False):
         self.reputation_cost_coefficient = reputation_cost_coefficient
         self.depth = depth                    # 1 = one ply, 2 = my move, their reply
         self.opponent_samples = opponent_samples
@@ -38,10 +39,14 @@ class PlannerConfig:
         self.depth2_replies = depth2_replies
         self.node_budget = node_budget        # adjudications per decision
         self.vengeance = vengeance
-        self.search = search                  # "expectiminimax" | "mcts"
-        # Extra depth-2 worlds in which the players I just betrayed come for
-        # me. 0 restores the old search, where defecting had no consequence
-        # inside the tree at all.
+        if search not in ("expectimax", "mcts", "regret"):
+            raise ValueError(f"unknown search {search!r}")
+        self.search = search                  # "expectimax" | "mcts" | "regret"
+        self.regret_candidates = regret_candidates  # order sets per seat in the solve
+        self.regret_anchor = regret_anchor    # P(an opponent plays its modelled policy)
+        self.regret_iterations = regret_iterations  # cap; cached joints cost no budget
+        self.reputation_carries = reputation_carries  # reputation outlives this game
+        # Extra depth-2 worlds in which the players I just betrayed come for me.
         self.retaliation_samples = retaliation_samples
         self.trace_coverage = trace_coverage
         self.reserve_keep_candidate = reserve_keep_candidate
@@ -64,23 +69,19 @@ SIEGE_CREDIT = 0.5
 # no deals with them, and breaking one to stop them is not charged as a betrayal.
 NEAR_WIN_MARGIN = 1
 
-# How much of the price a deal was signed at is forfeited by walking away from
-# it. 1.0 means signing and breaking are priced with the same number, so the
-# negotiator and the planner cannot disagree about an unchanged board; 0.0
-# restores the old behaviour, where breaking was charged only the reputation
-# term and was therefore ~20x cheaper than signing had been worth.
+# Share of a deal's signed price forfeited by walking away from it.
 FORFEIT_WEIGHT = 1.0
 
 # P(a betrayed player hits back) before anything has been seen of them. One in
 # three is the weight the retaliation world carried when it was one sample of three.
 RETALIATION_PRIOR = 1 / 3
 
-# Charged, in centres, per partner in Planner.loyal_to that an order set breaks
-# with first, so a loyal persona breaks first only for more than this. It needs
-# selective deals (NegotiationStrategy.overcommits): while bound players signed
-# with nearly everyone, any duty here handed the one persona without it 83-95%
-# of wins.
+# Charged, in centres, per partner in Planner.loyal_to an order set breaks with first.
 LOYALTY_COST = 1.0
+
+# Charged, in centres times the persona's reputation coefficient, per announced
+# move (INTENT) an order set does not make: Honest pays 0.5, the Opportunist 0.1.
+INTENT_COST = 0.1
 
 
 def evaluate_state(state: GameState, player: Player) -> float:
@@ -146,16 +147,8 @@ def near_win(state: GameState, player: Player) -> bool:
 
 
 def cooperation_value(state: GameState, me: Player, partner: Player) -> float:
-    """Vcoop: what the partner's cooperation is worth to me over the rest of
-    the game, in the same units as evaluate_state.
-
-    Two halves, both read straight off the board:
-      - defensive: my centres their units are sitting next to. If they turn on
-        me those are what I lose. A centre I already garrison myself counts for
-        much less -- that is how Vcoop collapses once I no longer need them.
-      - offensive: centres neither of us owns that we can both reach, i.e. the
-        ones their support could win me.
-    """
+    """Vcoop: my centres within the partner's reach (garrisoned ones count less)
+    plus centres neither owns that both can reach, in evaluate_state units."""
     partner_units = [u for u in state.units if u.player == partner]
     my_units = [u for u in state.units if u.player == me]
     if not partner_units or not my_units:
@@ -182,17 +175,13 @@ def sample_opponent_orders(
     opponent_model=None,
     commitments: Optional[List[Commitment]] = None,
     incentives: Optional[Dict[Player, float]] = None,
+    rational: bool = False,
 ) -> List[List[Order]]:
-    """Sample likely opponent orders.
-
-    If an *opponent_model* is provided, delegate to its weighted sampler, which
-    conditions the draw on what these players have promised when a trust model
-    is supplied. Otherwise fall back to uniform-random sampling.
-    """
+    """Sample joint opponent orders from the opponent model, else uniformly."""
     if opponent_model is not None:
         return opponent_model.sample_opponent_orders(
             state, samples, commitments=commitments, trust_model=trust_model,
-            incentives=incentives)
+            incentives=incentives, rational=rational)
 
     # ── Legacy uniform-random fallback ──────────────────────────────
     opponents = [p for p in players() if p != my_player]
@@ -214,22 +203,14 @@ def penalty_breakdown(state: GameState, player: Player, my_orders: List[Order],
                       commitments: List[Commitment], config: PlannerConfig,
                       trust_model: Optional[TrustModel] = None, incentive: float = 0.0,
                       outcomes=None, weights: Optional[Dict[Player, float]] = None):
-    """Price every commitment this order set breaks.
-
-        penalty = Vcoop(partner) x deltaP(partner keeps) x (turns left / 12)
-
-    There is no "betray" flag anywhere: near the horizon the last term shrinks,
-    and mid-game Vcoop collapses once the partner stops being useful. Either way
-    the same arithmetic stops paying for loyalty.
-
-    *weights* scales the charge per partner, from the persona's policy
-    (Agent.policy); a partner missing from it is charged in full.
+    """Vcoop x deltaP x horizon per broken deal, scaled by *weights*; horizon is
+    turns left / max turns, or 1 when reputation carries into the next game.
 
     Returns one (partner, vcoop, delta_p, horizon, amount) row per break.
     """
     rows = []
     weights = weights or {}
-    horizon = max(0, max_turns() - state.turn) / max_turns()
+    horizon = 1.0 if config.reputation_carries else max(0, max_turns() - state.turn) / max_turns()
 
     if outcomes is None:
         outcomes = verify_commitments(state, commitments, my_orders)
@@ -262,19 +243,9 @@ def forfeit_breakdown(state: GameState, player: Player, my_orders: List[Order],
                       commitments: List[Commitment],
                       forfeits: Dict[tuple, Tuple[float, float, float]],
                       outcomes=None):
-    """What this order set gives back of the prices it paid for its deals.
+    """The unused share of each broken deal's signed price (*forfeits* from Planner._forfeits).
 
-    The reputation term above prices the *belief* a break moves. It does not
-    price the thing the negotiator actually bought, and on this board deltaP
-    is around 0.04, so breaking came out ~20x cheaper than signing had been
-    worth. Charging the unused share of the signed price as well is what makes
-    the two halves of the agent quote one number for one promise.
-
-    *forfeits* is `Planner._forfeits`, computed once per decision because the
-    figure depends on the deal and the board, not on which order set broke it.
-
-    Returns one (commitment_key, partner, signed_price, fraction_remaining,
-    amount) row per broken deal.
+    Returns one (commitment_key, partner, signed_price, fraction_remaining, amount) row per break.
     """
     rows = []
     if not forfeits:
@@ -377,18 +348,8 @@ def hostile_world(state: GameState, me: Player) -> List[Order]:
 def defection_incentive(state: GameState, subject: Player,
                         commitments: List[Commitment], samples: int = 60,
                         resolver=None) -> float:
-    """iota — what the board is offering *this player* to break, right now.
-
-    The best they can do while breaking a live promise, minus the best they
-    can do while keeping every one, both against a quiet reference world. It
-    is the same quantity the planner computes for itself when it decides
-    whether a betrayal pays, computed from the outside: every order is
-    public, so an observer can run it.
-
-    The previous stand-in was "how much of my stuff is within their reach",
-    which turned out to carry no information about whether they actually
-    broke anything (kept 0.544 vs broke 0.549 over 932 graded promises).
-    """
+    """iota: this player's best value breaking a live promise minus their best
+    keeping every one, against a quiet world."""
     their_deals = [c for c in commitments if subject in c.players]
     if not their_deals:
         return 0.0
@@ -417,10 +378,7 @@ class Planner:
         self.player = player
         self.config = config
         self.opponent_model = None  # set by Agent after construction
-        # The negotiator that signed this seat's deals, set by Agent. Read for
-        # `deal_prices` — what each promise was credited with at signature —
-        # so breaking one can be charged the same number. No import: the
-        # dependency runs the other way round.
+        # The negotiator that signed this seat's deals (set by Agent), for deal_prices.
         self.negotiation = None
         self.nodes = 0              # adjudications spent on the last decision
         self._incentives: Dict[Player, float] = {}
@@ -428,6 +386,7 @@ class Planner:
         self.loyal_to: set = set()                    # partners owed loyalty (LOYALTY_COST)
         self.partner_weight: Dict[Player, float] = {} # reputation-cost scale per partner
         self.retaliation: Dict[Player, float] = {}    # P(they hit back once betrayed)
+        self.announced: List[Tuple[str, str]] = []   # moves I said I would make (INTENT)
 
     def _opponent_incentives(self, state: GameState, commitments: List[Commitment]
                              ) -> Dict[Player, float]:
@@ -452,17 +411,8 @@ class Planner:
     # ── forfeiture ──────────────────────────────────────────────────────
     def _forfeits(self, state: GameState, commitments: List[Commitment]
                   ) -> Dict[tuple, Tuple[float, float, float]]:
-        """{commitment_key: (signed_price, fraction_remaining, amount)} for my
-        live deals.
-
-            forfeit = FORFEIT_WEIGHT x signed_price x turns_left / deal_length
-
-        A deal I priced at signature and am a third of the way through is
-        worth two thirds of that price to keep; walking away now gives that
-        back. Negative prices clamp to zero — a deal cannot pay me to break
-        it. A live deal I never priced (inherited, or signed as a counter) is
-        re-priced on today's board, where every remaining turn is still ahead.
-        """
+        """{commitment_key: (signed_price, fraction_remaining, amount)} for my live deals,
+        amount = FORFEIT_WEIGHT x max(0, price) x turns_left / deal_length."""
         out: Dict[tuple, Tuple[float, float, float]] = {}
         if not FORFEIT_WEIGHT or self.negotiation is None:
             return out
@@ -486,6 +436,22 @@ class Planner:
             out[key] = (price, frac, max(0.0, FORFEIT_WEIGHT * price * frac))
         return out
 
+    def _costs(self, state, commitments, cand, trust_model, incentive, forfeits):
+        """(penalty, reputation rows, forfeit rows, loyalty, candour) of one order set."""
+        graded = verify_commitments(state, commitments, cand)
+        rows = penalty_breakdown(state, self.player, cand, commitments,
+                                 self.config, trust_model, incentive,
+                                 outcomes=graded, weights=self.partner_weight)
+        f_rows = forfeit_breakdown(state, self.player, cand, commitments,
+                                   forfeits, outcomes=graded)
+        loyalty = self._loyalty(graded)
+        said = [(f, t) for f, t in self.announced
+                if not any(o.unit_territory == f and o.order_type == OrderType.MOVE
+                           and o.target == t for o in cand)]
+        candour = INTENT_COST * self.config.reputation_cost_coefficient * len(said)
+        penalty = sum(r[-1] for r in rows) + sum(r[-1] for r in f_rows) + loyalty + candour
+        return penalty, rows, f_rows, loyalty, candour
+
     def _loyalty(self, graded) -> float:
         """LOYALTY_COST per partner in `loyal_to` this order set breaks with."""
         return LOYALTY_COST * len({
@@ -504,22 +470,11 @@ class Planner:
     def prune(self, state: GameState, candidates: List[List[Order]],
               commitments: List[Commitment],
               max_candidates: Optional[int] = None) -> Tuple[List[List[Order]], int]:
-        """Drop order sets no rational player would pick, then beam.
-
-        Each candidate is scored in two reference worlds — opponents all hold,
-        and opponents all attack me. A candidate is *dominated* when another
-        candidate does at least as well in both and better in one; a dominated
-        set cannot be the best reply to any mixture of the two. Loyal and
-        treacherous sets are pruned in separate pools, so an option is never
-        thrown away merely for keeping a promise.
-
-        Replaces `random.sample(49)`, which could discard the best move.
-        """
+        """Drop sets dominated in both reference worlds (all hold, all attack me),
+        loyal and treacherous sets in separate pools, then beam."""
         original_count = len(candidates)
         if max_candidates is not None and len(candidates) > max_candidates:
-            # Sample both promise keeping and breaking sets when available.
-            # In particular, an obligatory support should not lose its only
-            # legal order just because the product enumeration lists it late.
+            # Always keep one promise-keeping and one promise-breaking set.
             loyal = [c for c in candidates
                      if not breaks_commitment(state, self.player, c, commitments)]
             breaking = [c for c in candidates
@@ -594,17 +549,7 @@ class Planner:
     # ── vengeance ───────────────────────────────────────────────────────
     def _stance_bonus(self, before: GameState, after: GameState,
                       stance: Dict[Player, float]) -> float:
-        """Value this agent attaches to hurting (or sparing) a given player,
-        on top of what the board is worth to itself.
-
-        One dict carries both halves of the social position:
-          positive weight — a grudge. A Vengeful persona will take a move that
-            costs it a centre if it costs the betrayer more, which is what
-            "retaliates beyond value" has to mean in code.
-          negative weight — a threat it believes. Attacking that player is
-            priced up by the retaliation they promised, so a THREAT message
-            changes behaviour instead of being dropped on the floor.
-        """
+        """Value of hurting each player: positive weight is a grudge, negative a believed threat."""
         if not stance:
             return 0.0
         return sum(
@@ -616,25 +561,16 @@ class Planner:
     def _depth2_value(self, state: GameState, my_set: List[Order],
                       worlds: List[List[Order]], commitments: List[Commitment],
                       trust_model: Optional[TrustModel] = None) -> float:
-        """Expectiminimax, two plies: chance over their orders, max over my
-        reply, chance over their reply.
-
-        Depth-1 cannot see a move that wins a centre this turn and hands back
-        two the next; PlannerConfig.depth existed but was never read.
-        """
+        """Expectimax, two plies: chance over their orders, max over my reply,
+        chance over their reply."""
         cfg = self.config
 
-        # What this line of play does to my promises, and to whom. Everything
-        # below is the consequence the search could not previously see: a deal
-        # I break stops restraining the other side, and the people I broke it
-        # with have a reason to come for me next turn.
+        # Deals this line breaks, and whom it betrays.
         broken = [o.commitment for o in verify_commitments(state, commitments, my_set)
                   if not o.kept and self.player in o.broken_by]
         betrayed = {p for c in broken for p in c.players if p != self.player}
         broken_ids = {c.id for c in broken}
-        # Released, exactly as GameRunner.step releases the members of a pact
-        # somebody walked out of. Conditioning their reply on a promise I have
-        # already broken would be modelling them as still bound by it.
+        # Broken deals release their members, as in GameRunner.step.
         surviving = [c for c in commitments if c.id not in broken_ids]
 
         totals = []
@@ -650,17 +586,8 @@ class Planner:
                 opponent_model=self.opponent_model, commitments=surviving,
                 incentives=self._incentives)
 
-            # The punishment channel. Betrayal was priced only by the scalar
-            # Vcoop x deltaP x horizon; nothing in the tree showed the
-            # betrayed player doing anything about it, so the search saw a
-            # free centre and the penalty had to be large enough to outweigh
-            # it on its own. One world per betrayed party in which they spend
-            # their reply taking my things makes the cost a *position* rather
-            # than a fine -- which is what the grudge machinery already does
-            # once the turn is over (Agent.grudges, Planner._stance_bonus).
-            # Weighted by how often the betrayed have actually hit back when
-            # wronged (Agent.retaliation), so crossing a known avenger costs
-            # more than crossing a player who lets it go.
+            # Retaliation worlds: the betrayed spend their reply on me,
+            # weighted by how often they have hit back before.
             weights = [1.0] * len(their_replies)
             if betrayed and cfg.retaliation_samples:
                 calm = [o for o in their_replies[0] if o.player not in betrayed]
@@ -705,6 +632,8 @@ class Planner:
 
         if self.config.search == "mcts":
             return self.mcts_best_orders(state, commitments, trust_model, stance)
+        if self.config.search == "regret":
+            return self.regret_best_orders(state, commitments, trust_model, stance)
 
         my_order_sets, pruned, coverage = self._prepare_candidates(state, commitments)
 
@@ -712,7 +641,7 @@ class Planner:
         worlds = sample_opponent_orders(
             state, self.player, trust_model,
             samples=self.config.opponent_samples, opponent_model=self.opponent_model,
-            commitments=commitments, incentives=self._incentives,
+            commitments=commitments, incentives=self._incentives, rational=True,
         )
 
         # Pass 1: expected value of every surviving candidate, depth 1.
@@ -746,9 +675,7 @@ class Planner:
                 v = self._depth2_value(state, scored[i][0], worlds, commitments,
                                        trust_model)
                 if v is not None:
-                    # Vengeance stays the depth-1 estimate: it prices a grudge,
-                    # not a line of play, and doubling the search for it is not
-                    # worth the adjudications.
+                    # Vengeance stays the depth-1 estimate.
                     scored[i][1] = v
 
         # The incentive to defect is what a break buys over the best honest
@@ -765,14 +692,8 @@ class Planner:
             if breaks:
                 incentive = min(1.0, max(0.0, (avg_ev - best_loyal_ev) / CENTRE_VALUE))
 
-            graded = verify_commitments(state, commitments, my_set)
-            rows = penalty_breakdown(state, self.player, my_set, commitments,
-                                     self.config, trust_model, incentive,
-                                     outcomes=graded, weights=self.partner_weight)
-            f_rows = forfeit_breakdown(state, self.player, my_set, commitments,
-                                       forfeits, outcomes=graded)
-            loyalty = self._loyalty(graded)
-            penalty = sum(r[-1] for r in rows) + sum(r[-1] for r in f_rows) + loyalty
+            penalty, rows, f_rows, loyalty, candour = self._costs(
+                state, commitments, my_set, trust_model, incentive, forfeits)
             net_score = avg_ev + veng - penalty
             nets.append(net_score)
 
@@ -783,7 +704,7 @@ class Planner:
                     my_set, avg_ev, penalty,
                     self._explain(avg_ev, penalty, net_score, rows,
                                   avg_ev - best_loyal_ev if loyal_evs else None,
-                                  veng, f_rows, loyalty),
+                                  veng, f_rows, loyalty, candour),
                     bool(rows), penalty_rows=rows, nodes=self.nodes, vengeance=veng,
                     search=self.config.search, candidates=len(my_order_sets), pruned=pruned,
                     forfeit_rows=f_rows,
@@ -808,14 +729,7 @@ class Planner:
 
     def _break_advantages(self, state: GameState, commitments: List[Commitment],
                           scored, nets: List[float]) -> List[tuple]:
-        """Per live deal of mine: best net score breaking it, minus best net
-        keeping it.
-
-        Both sides are already-computed candidate scores, so this costs one
-        `verify_commitments` per (candidate, deal) and no adjudications. A
-        positive number is the planner saying it would rather break a promise
-        the negotiator signed in the same turn.
-        """
+        """Per live deal of mine: best net score breaking it minus best net keeping it."""
         rows = []
         for c in commitments:
             if self.player not in c.players:
@@ -836,15 +750,8 @@ class Planner:
                          trust_model: TrustModel,
                          stance: Optional[Dict[Player, float]] = None
                          ) -> Tuple[List[Order], DecisionTrace]:
-        """UCT over my order sets, one determinisation per playout.
-
-        Each iteration fixes a sample of what the opponents do (the
-        determinisation), plays my candidate against it, then rolls out one
-        more ply at random. Selection is UCB1, so the budget concentrates on
-        the candidates that keep looking good — the comparison the report
-        wants is this against expectiminimax at *equal adjudications*, which
-        is why both count through `self._resolve`.
-        """
+        """UCT over my order sets: one sampled opponent world per playout, then
+        one random rollout ply."""
         stance = stance or {}
         cfg = self.config
         candidates, pruned, coverage = self._prepare_candidates(state, commitments)
@@ -855,7 +762,7 @@ class Planner:
         worlds = sample_opponent_orders(
             state, self.player, trust_model, samples=max(8, cfg.opponent_samples // 2),
             opponent_model=self.opponent_model, commitments=commitments,
-            incentives=self._incentives)
+            incentives=self._incentives, rational=True)
 
         i = 0
         while self.nodes < cfg.node_budget:
@@ -901,14 +808,8 @@ class Planner:
             avg_ev = totals[k] / counts[k]
             breaks = breaks_commitment(state, self.player, cand, commitments)
             incentive = min(1.0, max(0.0, (avg_ev - best_loyal_ev) / CENTRE_VALUE)) if breaks else 0.0
-            graded = verify_commitments(state, commitments, cand)
-            rows = penalty_breakdown(state, self.player, cand, commitments,
-                                     self.config, trust_model, incentive,
-                                     outcomes=graded, weights=self.partner_weight)
-            f_rows = forfeit_breakdown(state, self.player, cand, commitments,
-                                       forfeits, outcomes=graded)
-            loyalty = self._loyalty(graded)
-            penalty = sum(r[-1] for r in rows) + sum(r[-1] for r in f_rows) + loyalty
+            penalty, rows, f_rows, loyalty, candour = self._costs(
+                state, commitments, cand, trust_model, incentive, forfeits)
             net = avg_ev - penalty
             if net > best_score:
                 best_score, best_orders = net, cand
@@ -916,7 +817,7 @@ class Planner:
                     cand, avg_ev, penalty,
                     self._explain(avg_ev, penalty, net, rows,
                                   avg_ev - best_loyal_ev if loyal else None,
-                                  0.0, f_rows, loyalty)
+                                  0.0, f_rows, loyalty, candour)
                     + f" [MCTS, {sum(counts)} playouts]",
                     bool(rows), penalty_rows=rows, nodes=self.nodes,
                     search="mcts", candidates=len(candidates), pruned=pruned,
@@ -933,9 +834,105 @@ class Planner:
             best_trace.coverage = coverage
         return best_orders, best_trace
 
+    # ── regret matching, same budget ────────────────────────────────────
+    def regret_best_orders(self, state: GameState, commitments: List[Commitment],
+                           trust_model: TrustModel,
+                           stance: Optional[Dict[Player, float]] = None
+                           ) -> Tuple[List[Order], DecisionTrace]:
+        """RM+ over a candidate set per seat, opponents anchored toward the
+        opponent model; plays a draw from my average strategy."""
+        stance = stance or {}
+        cfg = self.config
+        ranked, pruned, coverage = self._prepare_candidates(state, commitments)
+        # One candidate per movement plan, best-ranked support variant first.
+        # ponytail: keyed on moves alone; key on supports too if they start to matter.
+        plans: Dict[frozenset, List[Order]] = {}
+        for cand in ranked:
+            plans.setdefault(frozenset((o.unit_territory, o.target) for o in cand
+                                       if o.order_type == OrderType.MOVE), cand)
+        mine = list(plans.values())[:cfg.regret_candidates]
+        # Always offer the solve a way to keep every promise due.
+        if not any(not breaks_commitment(state, self.player, c, commitments) for c in mine):
+            loyal = next((c for c in ranked
+                          if not breaks_commitment(state, self.player, c, commitments)),
+                         None) or keeping_order_set(state, self.player, commitments)
+            if loyal is not None:
+                mine = mine[:cfg.regret_candidates - 1] + [loyal]
+        self._incentives = self._opponent_incentives(state, commitments)
+        forfeits = self._forfeits(state, commitments)
+
+        draws = sample_opponent_orders(
+            state, self.player, trust_model, samples=cfg.opponent_samples,
+            opponent_model=self.opponent_model, commitments=commitments,
+            incentives=self._incentives, rational=True)
+        seats = [self.player] + [p for p in players() if p != self.player
+                                 and any(u.player == p for u in state.units)]
+        sets: List[List[List[Order]]] = [mine]
+        anchors: List[Optional[List[float]]] = [None]
+        for q in seats[1:]:
+            counts: Dict[tuple, int] = {}
+            for world in draws:
+                key = tuple(o for o in world if o.player == q)
+                if not key:
+                    continue
+                counts[key] = counts.get(key, 0) + 1
+            top = sorted(counts.items(), key=lambda kv: -kv[1])[:cfg.regret_candidates]
+            sets.append([list(k) for k, _n in top])
+            total = sum(n for _k, n in top)
+            anchors.append([n / total for _k, n in top])
+
+        cost = [self._costs(state, commitments, c, trust_model, 0.0, forfeits)[0]
+                for c in mine]
+        resolved: Dict[tuple, GameState] = {}
+
+        def utility(p: int, joint: tuple) -> float:
+            if joint not in resolved:
+                orders = [o for seat, a in enumerate(joint) for o in sets[seat][a]]
+                resolved[joint] = self._resolve(state, orders, commitments)
+            after = resolved[joint]
+            if p:
+                return evaluate_state(after, seats[p])
+            return (evaluate_state(after, self.player)
+                    + self._stance_bonus(state, after, stance) - cost[joint[0]])
+
+        per_iteration = sum(len(x) for x in sets)
+        strategies, values, iterations = regret_matching(
+            [len(x) for x in sets], utility, iterations=cfg.regret_iterations,
+            anchors=anchors, anchor_weight=cfg.regret_anchor,
+            keep_going=lambda: self.nodes + per_iteration <= cfg.node_budget)
+        if not iterations:
+            hold_set = [Order(player=self.player, unit_territory=u.territory,
+                              order_type=OrderType.HOLD)
+                        for u in state.units if u.player == self.player]
+            return hold_set, DecisionTrace(hold_set, 0, 0, "Fallback to HOLD")
+
+        pick = random.choices(range(len(mine)), weights=strategies[0])[0]
+        chosen = mine[pick]
+        # Action values are net of the zero-incentive cost; add it back for EV.
+        ev = [values[0][k] + cost[k] for k in range(len(mine))]
+        loyal = [ev[k] for k, c in enumerate(mine)
+                 if not breaks_commitment(state, self.player, c, commitments)]
+        best_loyal = max(loyal) if loyal else 0.0
+        breaks = breaks_commitment(state, self.player, chosen, commitments)
+        incentive = min(1.0, max(0.0, (ev[pick] - best_loyal) / CENTRE_VALUE)) if breaks else 0.0
+        penalty, rows, f_rows, loyalty, candour = self._costs(
+            state, commitments, chosen, trust_model, incentive, forfeits)
+        gap = exploitability(strategies, values)
+        trace = DecisionTrace(
+            chosen, ev[pick], penalty,
+            self._explain(ev[pick], penalty, ev[pick] - penalty, rows,
+                          ev[pick] - best_loyal if loyal else None, 0.0, f_rows, loyalty, candour)
+            + f" [regret matching, {iterations} iterations, played with "
+              f"P={strategies[0][pick]:.2f}, exploitability {gap:.2f}]",
+            bool(rows), penalty_rows=rows, nodes=self.nodes, search="regret",
+            candidates=len(mine), pruned=pruned, forfeit_rows=f_rows, coverage=coverage)
+        trace.mixed = [(c, p) for c, p in zip(mine, strategies[0])]
+        trace.exploitability = gap
+        return chosen, trace
+
     @staticmethod
     def _explain(avg_ev, penalty, net_score, rows, gain, vengeance=0.0,
-                 forfeit_rows=(), loyalty=0.0) -> str:
+                 forfeit_rows=(), loyalty=0.0, candour=0.0) -> str:
         """One sentence an examiner can read off the screen. `gain` is the raw
         value over the best loyal order set, None when every option breaks."""
         veng = (f" Revenge worth {vengeance:.2f} counted in."
@@ -946,6 +943,7 @@ class Planner:
             for _key, partner, price, frac, amt in (forfeit_rows or ()))
         forfeit += (f" Breaks first with a partner owed loyalty: {loyalty:.2f}."
                     if loyalty else "")
+        forfeit += (f" Goes back on a move it announced: {candour:.2f}." if candour else "")
         if not rows:
             return (f"Value {avg_ev:.2f}, no commitment broken, net {net_score:.2f}. "
                     f"Keeping every live promise was already the best move.{veng}")

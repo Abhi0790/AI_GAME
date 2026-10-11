@@ -6,7 +6,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
 
-from src.common.config import GameConfig, add_board_args, board_kwargs
+from src.common.config import GameConfig, add_game_args, game_kwargs, DEFAULT_GAMES
 from src.harness import game_setup, play_many
 from src.engine.replay import save_replay
 from src.evaluation.metrics import MIN_GAMES, final_scores
@@ -17,21 +17,22 @@ from src.evaluation.analysis import (
 
 def main():
     parser = argparse.ArgumentParser(description="Run games and analyse results")
-    parser.add_argument("--games", type=int, default=MIN_GAMES,
+    parser.add_argument("--games", type=int, default=DEFAULT_GAMES,
                         help=f"Number of games (below {MIN_GAMES} is not reportable)")
     parser.add_argument("--seed", type=int, default=0, help="Starting seed")
-    parser.add_argument("--export", type=str, default=None,
+    parser.add_argument("--out", type=str, default=None,
                         help="Directory to export JSON data")
     parser.add_argument("--save-replays", action="store_true",
                         help="Save replay files")
-    add_board_args(parser)
+    add_game_args(parser)
     args = parser.parse_args()
 
     all_results = []
     all_histories = []
     all_personas = []
+    all_sharers = []
 
-    cfgs = [GameConfig(seed=args.seed + i, **board_kwargs(args)) for i in range(args.games)]
+    cfgs = [GameConfig(seed=args.seed + i, **game_kwargs(args)) for i in range(args.games)]
     for i, (cfg, runner) in enumerate(zip(cfgs, play_many(cfgs))):
         seed = cfg.seed
         print(f"\n{'='*40}")
@@ -46,6 +47,7 @@ def main():
         # The metrics read the seat list off the board.
         with game_setup(cfg):
             all_results.append(final_scores(runner.state))
+            all_sharers.append(runner.leaders())
             all_histories.append(runner.history)
 
             print_game_summary(runner.history, runner.state,
@@ -57,18 +59,19 @@ def main():
                     directory="replays",
                     filename=f"game_{seed}.json",
                     board=cfg.make_board().to_dict(),
+                    result=runner.result(),
                 )
                 print(f"Replay saved: {path}")
 
-        if args.export:
+        if args.out:
             export_game_data(
                 runner.history, runner.state,
-                filepath=os.path.join(args.export, f"game_{seed}.json"),
+                filepath=os.path.join(args.out, f"game_{seed}.json"),
             )
 
     if args.games > 1:
-        with game_setup(GameConfig(**board_kwargs(args))):
-            print_tournament_summary(all_results, all_histories, all_personas)
+        with game_setup(GameConfig(**game_kwargs(args))):
+            print_tournament_summary(all_results, all_histories, all_personas, all_sharers)
 
 
 if __name__ == "__main__":

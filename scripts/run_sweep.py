@@ -1,12 +1,9 @@
 """Fit the penalty constants and the trust network, and print the sweep.
 
-    python scripts/run_sweep.py --seeds 20 --out data/sweep.json
+    python scripts/run_sweep.py --games 20 --out data/sweep.json
     python scripts/run_sweep.py --axes LAMBDA_INCENTIVE=0.2,0.6 EVIDENCE_DECAY=0.85
 
-The grid defaults to the knobs in `sweep.default_axes()` and 20 seeds per
-cell, because below `metrics.MIN_GAMES` a win rate is 0% or 100% and means
-nothing. `--quick` is the opt-in escape hatch that fits the trust network and
-skips the grid; it used to be how data/sweep.json ended up with an empty grid.
+`--quick` fits the trust network and skips the grid.
 """
 
 import sys
@@ -17,6 +14,7 @@ import argparse
 import json
 import math
 
+from src.common.config import DEFAULT_GAMES
 from src.evaluation.metrics import MIN_GAMES, fmt_bounds, fmt_ci
 from src.evaluation.sweep import (
     sweep, measure, fit_cpt, baseline_brier, default_axes,
@@ -34,16 +32,16 @@ def parse_axes(specs):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--seeds", type=int, default=20, help="games per cell")
+    ap.add_argument("--games", type=int, default=DEFAULT_GAMES, help="games per cell")
     ap.add_argument("--out", default="data/sweep.json")
     ap.add_argument("--axes", nargs="*", default=None,
                     help="override the grid, e.g. LAMBDA_INCENTIVE=0.2,0.6")
     ap.add_argument("--quick", action="store_true",
                     help="fit the trust network only, skip the grid")
     args = ap.parse_args()
-    seeds = list(range(1, args.seeds + 1))
-    if args.seeds < MIN_GAMES:
-        print(f"warning: {args.seeds} seeds per cell is below MIN_GAMES="
+    seeds = list(range(1, args.games + 1))
+    if args.games < MIN_GAMES:
+        print(f"warning: {args.games} games per cell is below MIN_GAMES="
               f"{MIN_GAMES}; every number below is tagged not reportable.")
 
     print(f"Fitting the trust network on {len(seeds)} games...")
@@ -64,7 +62,7 @@ def main():
     print("  betrayal rate by persona:")
     for name, triple in sorted(base["betrayal_rate"].items()):
         print(f"    {name:12s}: {fmt_ci(*triple)}")
-    print(f"  win share by persona:")
+    print("  win share by persona:")
     for name, quad in sorted(base["wins"].items()):
         print(f"    {name:12s}: {fmt_bounds(*quad)}")
     print(f"  preference reversals: {fmt_ci(*base['reversal_rate'])} of priced "

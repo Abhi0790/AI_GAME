@@ -1,23 +1,8 @@
-"""Parameter sweep — fit the constants instead of asserting them.
+"""Parameter sweep over knob names and GameConfig fields, plus a direct fit of
+the trust CPT on logged (reliability, incentive, outcome) triples.
 
-The axes are now just knob names. Anything `src.harness.knob_values()` knows
-about, plus any `GameConfig` field, can be an axis, and every cell is one
-`GameConfig` that the grid JSON records verbatim — so a cell can be re-run
-from the file it was written to.
-
-What each cell reports, all with 95% intervals:
-
-  * the betrayal rate of each persona, and the Honest/Opportunist spread —
-    if one constant is carrying the whole persona difference, it shows here;
-  * mean deltaP at the moment a deal is broken — the deck's worked example
-    assumes ~0.65, and the sweep says what is actually reachable;
-  * Brier score and calibration error — whether P(keeps) means anything;
-  * the preference-reversal rate, which the penalty constants are supposed
-    to be what closes.
-
-The CPT is fitted directly on logged (reliability, incentive, outcome)
-triples rather than by grid-searching whole games, because the anchors do not
-change what agents do until they change what agents predict.
+Each cell reports persona betrayal rates, deltaP at break, Brier score,
+calibration error and preference reversals, with 95% intervals.
 """
 
 from typing import Dict, List, Any, Optional, Tuple
@@ -28,19 +13,16 @@ import numpy as np
 from scipy.optimize import minimize
 
 from src.common.config import GameConfig
-from src.common.schemas import leaders
 from src.harness import play_many, knob_values
 from src.agents.trust import model as trust_model_module
 from src.evaluation.metrics import (
     betrayal_rate_per_persona, brier_score, calibration_error, vcoop_at_break,
-    final_scores, preference_reversals, ci95, mean_ci95,
+    preference_reversals, ci95, mean_ci95,
 )
 
 CFG_FIELDS = set(GameConfig.__dataclass_fields__)
 
-# A fitted CPT must still let trust say no: a partner who broke their last
-# DISTRUST_BREAKS promises, with nothing tempting them, must fall below
-# DISTRUST_P, the P(keep) at which an even-odds deal is refused.
+# A partner who broke their last DISTRUST_BREAKS promises must fall below DISTRUST_P.
 DISTRUST_BREAKS = 3
 DISTRUST_P = 0.5
 
@@ -97,7 +79,7 @@ def _game_result(cfg: GameConfig, runner) -> Dict[str, Any]:
         "betrayal": betrayal_rate_per_persona(runner.history, personas),
         "calibration": runner.calibration,
         "reversals": runner.reversals,
-        "leaders": [personas[p] for p in leaders(final_scores(runner.state))],
+        "leaders": [personas[p] for p in runner.leaders()],
     }
 
 
@@ -183,20 +165,8 @@ def sweep(seeds: List[int], axes: Optional[Dict[str, List[float]]] = None
 
 def fit_cpt(calibration: List, holdout: float = 0.3, distrust: bool = True
             ) -> Tuple[float, float, float, float]:
-    """Refit the Keeps node's conditional table on logged predictions.
-
-    Each logged point carries the reliability and incentive that produced it,
-    so the CPT can be re-evaluated on the same evidence without replaying a
-    single game. Fits (BN_CEILING, BN_BIAS, BN_TEMPTATION) by least squares --
-    the Brier score -- and returns them with the Brier on a held-out split.
-
-    The split is BY GAME so a game's rows cannot straddle the two -- they share
-    a seed, a board and the same players. Pass holdout=0 for in-sample.
-
-    Nothing is applied: the fitted values are printed with the knob names to
-    set them under, because adopting a CPT changes which promises ever get
-    graded, and it has to be judged on the games it produces itself.
-    """
+    """Fit (BN_CEILING, BN_BIAS, BN_TEMPTATION) by least squares on logged
+    predictions, with the Brier score on a held-out split by game. Applies nothing."""
     graded = [c for c in calibration if c.observed is not None]
     current = (trust_model_module.BN_CEILING, trust_model_module.BN_BIAS,
                trust_model_module.BN_TEMPTATION)

@@ -69,13 +69,6 @@ class TestOpponentProfile:
         p.record_orders(orders)
         assert p.target_freq["N1"] == 2
 
-    def test_persona_estimation(self):
-        p = OpponentProfile(Player.BLUE)
-        # Simulate high trust-keeping
-        for _ in range(10):
-            p.record_commitment_outcome(kept=True)
-        assert p.estimated_persona() == "Honest"
-
     def test_ignores_other_player_orders(self):
         p = OpponentProfile(Player.BLUE)
         orders = [
@@ -142,3 +135,40 @@ def test_draws_break_at_the_believed_rate():
     draws = model.sample_opponent_orders(state, 4000, commitments=[deal], trust_model=trust)
     broke = sum(any(o.player == Player.BLUE and o.target == "N1" for o in w) for w in draws)
     assert abs(broke / len(draws) - (1 - p_keep)) < 0.03
+
+
+def test_level1_model_expects_an_opponent_to_take_a_free_centre():
+    """Blue stands on C2, a plain square, in autumn; every move off it takes a
+    centre and holding takes nothing. A level-1 model expects the capture far
+    more often than the move-frequency prior does."""
+    import random
+    from src.engine.board import get_supply_centers, get_all_territories
+    state = GameState(
+        turn=2,
+        units=[Unit(player=Player.BLUE, territory="C2"), Unit(player=Player.RED, territory="R2")],
+        supply_centers={t: None for t in get_supply_centers()}
+        | {"R1": Player.RED, "R2": Player.RED, "B1": Player.BLUE},
+        territory_owners={t: None for t in get_all_territories()},
+    )
+    model = OpponentModel(Player.RED)
+    holds = lambda worlds: sum(all(o.order_type != OrderType.MOVE
+                                   for o in w if o.player == Player.BLUE) for w in worlds)
+    random.seed(0)
+    prior = holds(model.sample_opponent_orders(state, 400))
+    random.seed(0)
+    rational = holds(model.sample_opponent_orders(state, 400, rational=True))
+    assert rational < prior / 3
+
+
+def test_level1_cache_is_keyed_on_valuation_knobs():
+    from src.agents.opponent_model.opponent_model import level1_values
+    from src.agents.planner import planner as P
+    from src.engine.orders import generate_all_order_sets
+    state = _make_state()
+    sets = generate_all_order_sets(state, Player.BLUE)
+    before = level1_values(state, Player.BLUE, sets)
+    old, P.CENTRE_VALUE = P.CENTRE_VALUE, 3.0
+    try:
+        assert level1_values(state, Player.BLUE, sets) != before
+    finally:
+        P.CENTRE_VALUE = old

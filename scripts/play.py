@@ -1,12 +1,6 @@
 """Play a seat from the terminal.
 
     python scripts/play.py --seat Red
-
-This used to carry its own HumanAgent with no trust model, no beliefs and no
-decision trace — a second, slowly diverging copy of the one in
-src/agents/agent.py. It now wraps the shared one and only adds the prompting,
-so the CLI seat learns and can see its own beliefs exactly
-like the web seat does.
 """
 
 import sys
@@ -15,26 +9,16 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
 
-from src.common.config import GameConfig, add_board_args, board_kwargs, seating_for
+from src.common.config import GameConfig, add_game_args, game_kwargs, seating_for
 from src.harness import build_runner, game_setup
 from src.common.schemas import (
-    Player, Order, OrderType, MessageType, CommitmentType, describe_message,
+    Player, MessageType, CommitmentType, describe_message,
 )
 from src.agents.agent import HumanAgent
-from src.engine.orders import generate_orders_for_unit
+from src.engine.orders import generate_orders_for_unit, order_label
 from src.engine.board import players, win_centers
 
 BAR = "─" * 62
-
-
-def _order_label(o: Order) -> str:
-    if o.order_type == OrderType.HOLD:
-        return f"{o.unit_territory} holds"
-    if o.order_type == OrderType.MOVE:
-        return f"{o.unit_territory} -> {o.target}"
-    if o.supported_from:
-        return f"{o.unit_territory} supports {o.supported_from} -> {o.target}"
-    return f"{o.unit_territory} supports {o.target} holding"
 
 
 def _ask(prompt: str, options: list) -> int:
@@ -59,6 +43,10 @@ class CLIHuman(HumanAgent):
                 print(f"\n  ⚠  {describe_message(msg)}")
                 self.receive_threat(msg)
                 continue
+            if msg.message_type == MessageType.INTENT:
+                print(f"\n  ➜  {describe_message(msg)}  (candour so far "
+                      f"{self.candour_of(msg.sender):.2f})")
+                continue
             if msg.message_type not in (MessageType.PROPOSE, MessageType.COUNTER):
                 continue
             print(f"\n  ✉  {describe_message(msg)}")
@@ -66,8 +54,12 @@ class CLIHuman(HumanAgent):
                 msg.sender, msg.commitment_type or CommitmentType.ALLIANCE, 0.0)
             print(f"     your model says P({msg.sender.value} keeps it) = {p:.2f}")
             take = _ask("     accept? ", ["reject", "accept"]) == 1
-            self.decisions[(msg.sender, msg.commitment_type)] = take
+            self.decisions[self.decision_key(msg)] = take
         return super().reply(state, incoming, commitments)
+
+    def vote_draw(self, state, stalled):
+        print(f"\n  {stalled} turns without a centre changing hands.")
+        return _ask("  vote for a draw? ", ["no", "yes"]) == 1
 
     def act(self, state, active_commitments):
         print(f"\n{BAR}\n  YOUR ORDERS — turn {state.turn}\n{BAR}")
@@ -83,14 +75,14 @@ class CLIHuman(HumanAgent):
         for u in mine:
             options = generate_orders_for_unit(state, u)
             print(f"\n  unit at {u.territory}:")
-            idx = _ask("  order? ", [_order_label(o) for o in options])
+            idx = _ask("  order? ", [order_label(o) for o in options])
             chosen.append(options[idx])
         self.pending_orders = chosen
         return super().act(state, active_commitments)
 
 
 def show_beliefs(agent):
-    print(f"\n  your beliefs — P(keeps), Beta posterior mean")
+    print("\n  your beliefs — P(keeps), Beta posterior mean")
     types = list(CommitmentType)
     print("    " + "subject".ljust(9) + "".join(t.value.rjust(11) for t in types))
     for subject in players():
@@ -105,12 +97,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seat", default="Red", choices=[p.value for p in Player])
     ap.add_argument("--seed", type=int, default=0)
-    add_board_args(ap)
+    add_game_args(ap)
     args = ap.parse_args()
 
     seat = Player(args.seat)
     # Fixed seating: a human should be told who everyone is once.
-    cfg = GameConfig(seed=args.seed, human_seat=seat, **board_kwargs(args))
+    cfg = GameConfig(seed=args.seed, human_seat=seat, **game_kwargs(args))
     cfg.seating = seating_for(0, cfg.make_board().players)
     if seat not in cfg.seating:
         ap.error(f"{seat.value} is not seated in a {args.seats}-player game; "
@@ -131,12 +123,12 @@ def _play(runner, you, seat):
     while runner.state.turn <= runner.max_turns:
         record = runner.step()
         counts = runner.center_counts()
-        print(f"\n  centres: " + "  ".join(
+        print("\n  centres: " + "  ".join(
             f"{p.value} {c}" for p, c in counts.items()))
         for e in record.log.events:
             print(f"    {e}")
         show_beliefs(you)
-        if runner.winner():
+        if runner.over():
             break
 
     champion = runner.winner()
@@ -144,6 +136,9 @@ def _play(runner, you, seat):
     ahead = runner.leaders()
     if champion:
         result = f"{champion.value} wins with {counts[champion]} centres."
+    elif runner.drawn:
+        ahead = runner.drawn
+        result = f"Draw agreed: {', '.join(p.value for p in ahead)}."
     else:
         result = (f"Shared lead on {counts[ahead[0]]} centres: "
                   f"{', '.join(sorted(p.value for p in ahead))}.")

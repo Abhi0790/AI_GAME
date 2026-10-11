@@ -10,7 +10,7 @@ from src.harness import play
 from src.engine.board import win_centers, max_turns, players, get_all_territories
 from src.engine.replay import save_replay, load_replay, reconstruct_states
 from src.evaluation.metrics import (
-    supply_center_timeline, betrayal_events, final_scores,
+    supply_center_timeline, final_scores,
     betrayal_rate_per_player, forfeit_at_break,
 )
 import os

@@ -1,9 +1,6 @@
 """Multi-game win rates, by persona, with intervals.
 
     python scripts/run_tournament.py --games 20
-
-Personas rotate one seat per game (the harness does it), so every number is a
-statement about the persona and not about the colour it sat in.
 """
 
 import sys
@@ -12,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
 
-from src.common.config import GameConfig, add_board_args, board_kwargs
+from src.common.config import GameConfig, add_game_args, game_kwargs, DEFAULT_GAMES
 from src.harness import play_many
 from src.evaluation.metrics import (
     MIN_GAMES, betrayal_rate_per_persona, preference_reversals,
@@ -72,7 +69,7 @@ def run_tournament(games: int = MIN_GAMES, board: dict | None = None):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--games", type=int, default=MIN_GAMES)
-    add_board_args(ap)
+    ap.add_argument("--games", type=int, default=DEFAULT_GAMES)
+    add_game_args(ap)
     _args = ap.parse_args()
-    run_tournament(_args.games, board_kwargs(_args))
+    run_tournament(_args.games, game_kwargs(_args))

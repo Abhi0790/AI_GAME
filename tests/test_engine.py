@@ -2,8 +2,8 @@ import random
 from types import SimpleNamespace
 
 import pytest
-from src.common.schemas import GameState, Order, OrderType, Player, Unit, Commitment, CommitmentType
-from src.engine.adjudicator import resolve, verify_commitments
+from src.common.schemas import GameState, Order, OrderType, Player, Unit
+from src.engine.adjudicator import resolve
 from src.engine.runner import GameRunner, AGENT_METHODS
 from src.engine.board import players, get_all_territories
 from src.agents.agent import Agent

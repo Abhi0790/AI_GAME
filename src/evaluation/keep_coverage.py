@@ -3,7 +3,7 @@
 from typing import Optional
 
 from src.common.config import GameConfig
-from src.common.schemas import Player, leaders, obligated_parties
+from src.common.schemas import obligated_parties
 from src.evaluation.metrics import final_scores
 from src.evaluation.trust_ablation import paired_interval, variant_seat
 from src.harness import play_many
@@ -30,7 +30,7 @@ def _break_category(coverage: dict) -> str:
 def _game_result(cfg: GameConfig, runner) -> dict:
     seat = variant_seat(cfg.seed, cfg.make_board().players)
     scores = final_scores(runner.state)
-    ahead = leaders(scores)
+    ahead = runner.leaders()
     categories = {name: 0 for name in CATEGORIES}
     due_total = broken_total = missed = keepable = scored_break_turns = 0
     for step in runner.history:

@@ -50,7 +50,7 @@ FROM source AS report
 USER app
 VOLUME ["/app/figures", "/app/data"]
 ENTRYPOINT ["python"]
-# MIN_GAMES games, not 8: below it every figure prints "not reportable".
+# DEFAULT_GAMES (60) games; below MIN_GAMES every figure prints "not reportable".
 # The sweep is part of the report, so report.sh runs both.
 CMD ["scripts/report.py", "--out", "figures"]
 

@@ -64,8 +64,6 @@ def draw_action_phase(state, orders, log):
     # Draw base edges in light gray
     nx.draw_networkx_edges(G, pos=POS, ax=AX, edge_color='lightgray')
     
-    log_text = " ".join(log.events)
-    
     # Draw order arrows
     for o in orders:
         if o.order_type.name == "MOVE":

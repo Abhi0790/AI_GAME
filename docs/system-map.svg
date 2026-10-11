@@ -488,7 +488,7 @@
     <g transform="translate(12,450)">
       <circle cx="10" cy="10" r="9" fill="#2f6fdb"/><text class="badge" x="10" y="14">5</text>
       <text class="b" x="28" y="14" font-weight="650">Search</text>
-      <text class="b" x="112" y="14">depth-2 expectiminimax: my move, their sampled reply</text>
+      <text class="b" x="112" y="14">depth-2 expectimax: my move, their sampled reply</text>
       <text class="mono" x="112" y="32">opponent_samples 32 · beam 8 · depth2 4×6×6</text>
       <text class="mono" x="112" y="48">retaliation_samples 1 · node_budget 1500</text>
       <text class="b" x="112" y="66">the budget is in <tspan font-weight="650">adjudications</tspan>, so the MCTS variant can be</text>
@@ -660,7 +660,7 @@
     <text class="b" x="12" y="237">what loyalty was actually worth when it was dropped —</text>
     <text class="b" x="12" y="253">the figure that shows betrayal is priced, not triggered.</text>
     <text class="b" x="12" y="278" font-weight="650">Adjudications per turn</text>
-    <text class="b" x="12" y="294">the honest cost axis for expectiminimax vs MCTS.</text>
+    <text class="b" x="12" y="294">the honest cost axis for expectimax vs MCTS.</text>
   </g>
 
   <path class="flowa" d="M1080,200 L1096,200"/>

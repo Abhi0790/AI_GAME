@@ -205,3 +205,47 @@ class TestGameEnd:
         far = {"R1": Player.RED, "R2": Player.RED, "B1": Player.BLUE, "B2": Player.BLUE}
         assert penalty_breakdown(_make_state(supply_centers=far), Player.RED, attack, [deal], cfg)
         assert not penalty_breakdown(_make_state(supply_centers=near), Player.RED, attack, [deal], cfg)
+
+
+def test_reputation_cost_vanishes_on_the_last_turn():
+    """Backward induction: on the final turn there is no future to protect, so
+    breaking is charged no reputation cost (forfeit and loyalty still apply)."""
+    from src.agents.planner.planner import penalty_breakdown, PlannerConfig
+    from src.common.schemas import Commitment, CommitmentType, GameState, Order, OrderType, Player, Unit
+    from src.engine.board import get_all_territories, get_supply_centers, max_turns
+    R, B = Player.RED, Player.BLUE
+    deal = Commitment(id="a", commitment_type=CommitmentType.ALLIANCE, players=[R, B],
+                      valid_until_turn=99)
+    attack = [Order(player=R, unit_territory="R2", order_type=OrderType.MOVE, target="B1")]
+
+    def amount(turn):
+        s = GameState(turn=turn, units=[Unit(player=R, territory="R2"), Unit(player=B, territory="B1")],
+                      supply_centers={t: None for t in get_supply_centers()} | {"B1": B, "R2": R},
+                      territory_owners={t: None for t in get_all_territories()})
+        rows = penalty_breakdown(s, R, attack, [deal], PlannerConfig())
+        return sum(r[-1] for r in rows)
+    assert amount(1) > 0 and amount(max_turns()) == 0
+
+
+def test_carried_reputation_keeps_its_cost_on_the_last_turn():
+    """When reputation carries into the next game there is no last turn for it."""
+    from src.agents.planner.planner import penalty_breakdown, PlannerConfig
+    from src.common.schemas import Commitment, CommitmentType, GameState, Order, OrderType, Player, Unit
+    from src.engine.board import get_all_territories, get_supply_centers, max_turns
+    R, B = Player.RED, Player.BLUE
+    deal = Commitment(id="a", commitment_type=CommitmentType.ALLIANCE, players=[R, B],
+                      valid_until_turn=99)
+    attack = [Order(player=R, unit_territory="R2", order_type=OrderType.MOVE, target="B1")]
+    s = GameState(turn=max_turns(), units=[Unit(player=R, territory="R2"), Unit(player=B, territory="B1")],
+                  supply_centers={t: None for t in get_supply_centers()} | {"B1": B, "R2": R},
+                  territory_owners={t: None for t in get_all_territories()})
+    rows = penalty_breakdown(s, R, attack, [deal], PlannerConfig(reputation_carries=True))
+    assert rows and all(r[3] == 1.0 and r[-1] > 0 for r in rows)
+
+
+def test_play_series_marks_all_but_the_last_game_as_carrying():
+    from src.common.config import GameConfig
+    from src.harness import play_series
+    flags = play_series([GameConfig(seed=s, max_turns=2) for s in range(3)],
+                        reduce=lambda cfg, _r: cfg.reputation_carries)
+    assert flags == [True, True, False]

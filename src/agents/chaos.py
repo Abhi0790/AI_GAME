@@ -1,20 +1,5 @@
-"""A seat that behaves badly on purpose.
-
-The robustness requirement is not "the adjudicator ignores two junk orders",
-it is "a real game survives a player who does everything wrong at once". This
-agent takes a seat in GameRunner exactly like any other and, every turn,
-picks one of the ways a participant can misbehave:
-
-  * orders for units it does not own, or for territories that do not exist
-  * two contradictory orders for the same unit in the same turn
-  * moves to non-adjacent territories, supports for nobody
-  * silence — no orders at all, no replies at all
-  * accepting a proposal that was never made
-  * flooding the table with malformed, out-of-grammar messages
-
-Nothing here is random noise for its own sake: each mode is a thing a buggy
-or hostile client could actually send.
-"""
+"""A seat that misbehaves on purpose: foreign or duplicate orders, illegal moves,
+silence, accepting proposals never made, and out-of-grammar messages."""
 
 from typing import List, Dict, Optional, Tuple
 import random
@@ -53,9 +38,7 @@ class ChaosAgent:
         if mode == "spam_proposals":
             return [self._junk_proposal(state) for _ in range(12)]
         if mode == "out_of_grammar":
-            # A PROPOSE with no commitment type, a DMZ over nothing, a support
-            # of a unit that does not exist: all legal Message objects, none
-            # of them a sentence the grammar defines.
+            # Valid Message objects that are not sentences of the grammar.
             return [
                 Message(id=str(uuid.uuid4()), sender=self.player,
                         receiver=self._other(), message_type=MessageType.PROPOSE),

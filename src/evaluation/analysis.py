@@ -4,7 +4,7 @@ Analysis utilities — human-readable summaries and JSON export.
 
 import json
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Optional
 
 from src.engine.board import players
 from src.common.schemas import Player, GameState, leaders
@@ -48,11 +48,7 @@ def _betrayal_counts(history: list, personas: Dict[Player, str] = None
 def print_game_summary(history: list, final_state: GameState,
                        personas: Dict[Player, str] = None,
                        calibration: list = None, reversals: list = None):
-    """Print a formatted single-game summary to stdout.
-
-    *personas* turns seat colours into the thing the report actually compares.
-    "Red betrays more than Blue" says nothing on its own.
-    """
+    """Print a formatted single-game summary, keyed by persona."""
     print("\n" + "=" * 60)
     print("  GAME SUMMARY")
     print("=" * 60)
@@ -75,9 +71,7 @@ def print_game_summary(history: list, final_state: GameState,
         print(f"  Turn {b['turn']}: {b['commitment_type']} between "
               f"{b['players']} broken by {b['broken_by']}")
 
-    # Betrayal rates. Keyed by Player for the seat colour, and by persona for
-    # everything the report actually compares — the persona table is the one
-    # to read, the colour one is a sanity check.
+    # Betrayal rates by seat (a sanity check) and by persona.
     counts = _betrayal_counts(history, personas)
     print("\nBetrayal Rates by seat:")
     rates = betrayal_rate_per_player(history)
@@ -109,7 +103,7 @@ def print_game_summary(history: list, final_state: GameState,
         print(f"\nSearch cost: {sum(nodes)} adjudications, "
               f"{sum(nodes) / max(1, len(nodes)):.0f} per turn")
     coalition = turns_to_coalition(history)
-    print(f"First standing alliance: " +
+    print("First standing alliance: " +
           (f"turn {coalition}" if coalition else "never formed"))
 
     rev = preference_reversals(reversals or [], personas)
@@ -165,14 +159,9 @@ def print_tournament_summary(
     game_results: List[Dict[Player, int]],
     all_histories: List[list],
     all_personas: List[Dict[Player, str]] = None,
+    all_sharers: Optional[List[List[Player]]] = None,
 ):
-    """Print cross-game tournament statistics.
-
-    *all_personas* is one mapping per game, because the harness rotates the
-    personas one seat per seed. Pooling them under a single game's mapping —
-    which is what this used to do — attributes every rate to the wrong
-    persona in three games out of four.
-    """
+    """Print cross-game statistics; *all_personas* and *all_sharers* are per game."""
     print("\n" + "=" * 60)
     print("  TOURNAMENT SUMMARY")
     print("=" * 60)
@@ -182,7 +171,7 @@ def print_tournament_summary(
           (f"   [below MIN_GAMES={MIN_GAMES}: nothing here is reportable]"
            if n < MIN_GAMES else ""))
 
-    wr = win_rates(game_results)
+    wr = win_rates(game_results, all_sharers)
     print("\nWin Rates by seat (should be flat — the personas rotate):")
     for p in players():
         print(f"  {p.value:6s}: {fmt_rate(round(wr[p] * n), n)}")
@@ -195,14 +184,13 @@ def print_tournament_summary(
     if all_personas:
         pooled: Dict[str, List[int]] = {}
         wins: Dict[str, float] = {}
-        for history, personas, scores in zip(all_histories, all_personas,
-                                             game_results):
+        for i, (history, personas, scores) in enumerate(zip(all_histories, all_personas,
+                                                            game_results)):
             for name, (broke, total) in _betrayal_counts(history, personas).items():
                 row = pooled.setdefault(name, [0, 0])
                 row[0] += broke
                 row[1] += total
-            best = max(scores.values())
-            champs = [p for p, c in scores.items() if c == best]
+            champs = all_sharers[i] if all_sharers else leaders(scores)
             for c in champs:
                 wins[personas[c]] = wins.get(personas[c], 0) + 1 / len(champs)
 

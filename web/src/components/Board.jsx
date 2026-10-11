@@ -16,7 +16,11 @@ export default function Board({ board, state, step, onPick, selected }) {
   const scale = Math.min(1, Math.sqrt(12 / board.territories.length));
   const centres = new Set(board.supply_centers);
   const unitAt = {};
-  for (const u of state?.units ?? []) unitAt[u.territory] = u.player;
+  const fleetAt = {};
+  for (const u of state?.units ?? []) {
+    unitAt[u.territory] = u.player;
+    fleetAt[u.territory] = u.unit_type === "Fleet";
+  }
 
   const edges = [];
   const seen = new Set();
@@ -58,13 +62,13 @@ export default function Board({ board, state, step, onPick, selected }) {
       <svg viewBox={`0 0 ${VIEWBOX} ${VIEWBOX}`} role="img" aria-label="Game board">
         <defs>
           <marker id="ah-ok" markerWidth="7" markerHeight="6" refX="6.5" refY="3" orient="auto">
-            <path d="M0 0 L7 3 L0 6 Z" fill="#5fb98b" />
+            <path d="M0 0 L7 3 L0 6 Z" fill="var(--good)" />
           </marker>
           <marker id="ah-no" markerWidth="7" markerHeight="6" refX="6.5" refY="3" orient="auto">
-            <path d="M0 0 L7 3 L0 6 Z" fill="#d4736f" />
+            <path d="M0 0 L7 3 L0 6 Z" fill="var(--bad)" />
           </marker>
           <marker id="ah-sup" markerWidth="6" markerHeight="5" refX="5.5" refY="2.5" orient="auto">
-            <path d="M0 0 L6 2.5 L0 5 Z" fill="#6ea8fe" />
+            <path d="M0 0 L6 2.5 L0 5 Z" fill="var(--accent)" />
           </marker>
         </defs>
         <g>{edges}</g>
@@ -86,11 +90,11 @@ export default function Board({ board, state, step, onPick, selected }) {
                 <circle
                   cx={p.x} cy={p.y} r={r}
                   className={`node${isSc ? " sc" : ""}`}
-                  fill={owner ? COLOR[owner] : "#1a1f27"}
+                  fill={owner ? COLOR[owner] : "var(--panel-2)"}
                   fillOpacity={owner ? (occupied ? 1 : 0.45) : 1}
                   stroke={
-                    selected === name ? "#6ea8fe"
-                      : isSc ? (owner ? COLOR[owner] : "#2a313b") : "#0b0d10"
+                    selected === name ? "var(--accent)"
+                      : isSc ? (owner ? COLOR[owner] : "var(--line-2)") : "var(--bg)"
                   }
                   strokeWidth={selected === name ? 3 : isSc ? 2.5 : 1.5}
                 >
@@ -105,13 +109,13 @@ export default function Board({ board, state, step, onPick, selected }) {
                   {name}
                 </text>
                 {occupied && (
-                  <text className="nunit" x={p.x} y={p.y + 8 * scale} fill="#0b0d10"
+                  <text className="nunit" x={p.x} y={p.y + 8 * scale} fill="var(--bg)"
                         style={{ fontSize: `${11 * scale}px` }}>
-                    ▲{CODE[unitAt[name]] ?? ""}
+                    {fleetAt[name] ? "◆" : "▲"}{CODE[unitAt[name]] ?? ""}
                   </text>
                 )}
                 {!occupied && owner && (
-                  <text className="nowner" x={p.x} y={p.y + 9 * scale} fill="#0b0d10"
+                  <text className="nowner" x={p.x} y={p.y + 9 * scale} fill="var(--bg)"
                         style={{ fontSize: `${9 * scale}px` }}>
                     {CODE[owner] ?? ""}
                   </text>
@@ -127,7 +131,8 @@ export default function Board({ board, state, step, onPick, selected }) {
         <span><i className="ln sup" />support</span>
         <span><i className="sw sc" />supply centre (larger)</span>
         <span><i className="sw faded" />owned, empty</span>
-        <span>▲ unit</span>
+        <span>▲ army</span>
+        {board.fleet_adjacency && Object.keys(board.fleet_adjacency).length > 0 && <span>◆ fleet</span>}
       </div>
     </div>
   );

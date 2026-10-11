@@ -9,21 +9,19 @@ from pathlib import Path
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.common.config import add_board_args, board_kwargs
+from src.common.config import add_game_args, game_kwargs, DEFAULT_GAMES
 from src.evaluation.trust_ablation import run
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--games", type=int, default=24,
-                        help="paired test games; 24 balances default seats and personas")
-    parser.add_argument("--train-games", type=int, default=24)
+    parser.add_argument("--games", type=int, default=DEFAULT_GAMES,
+                        help="paired test games; a multiple of 12 balances seats and personas")
+    parser.add_argument("--train-games", type=int, default=DEFAULT_GAMES)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--train-seed", type=int, default=10000)
-    parser.add_argument("--budget", type=int, default=400)
-    parser.add_argument("--workers", type=int, default=None)
     parser.add_argument("--out", default="data/trust_ablation.json")
-    add_board_args(parser)
+    add_game_args(parser, budget=400)
     args = parser.parse_args()
     if args.games < 2 or args.train_games < 2:
         parser.error("at least two training and two paired test games are required")
@@ -31,7 +29,7 @@ def main():
     report = run(
         list(range(args.train_seed, args.train_seed + args.train_games)),
         list(range(args.seed, args.seed + args.games)),
-        board_kwargs(args), node_budget=args.budget, workers=args.workers)
+        game_kwargs(args), node_budget=args.budget)
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     opportunities_path = str(Path(args.out).with_suffix(".opportunities.jsonl.gz"))
     with gzip.open(opportunities_path, "wt") as stream:

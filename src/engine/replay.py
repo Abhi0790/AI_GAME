@@ -1,19 +1,14 @@
-"""
-Replay System — save and load complete game histories as JSON.
-
-A replay file contains the full sequence of game states, orders, commitment
-outcomes, and decision traces so that a game can be reviewed after the fact.
-"""
+"""Save and load complete game histories as JSON."""
 
 import json
 import os
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Optional
 
 from src.engine.board import active
 from src.common.schemas import (
-    GameState, Order, OrderType, Player, Unit, Commitment,
-    CommitmentType, UnitType, describe_message,
+    GameState, Order, Player, Unit, UnitType, Commitment,
+    CommitmentType, describe_message,
 )
 
 
@@ -21,7 +16,8 @@ def _serialise_state(state: GameState) -> dict:
     return {
         "turn": state.turn,
         "units": [
-            {"player": u.player.value, "territory": u.territory}
+            {"player": u.player.value, "territory": u.territory,
+             "unit_type": u.unit_type.value, "coast": u.coast}
             for u in state.units
         ],
         "supply_centers": {
@@ -43,6 +39,7 @@ def _serialise_orders(orders: List[Order]) -> list:
             "order_type": o.order_type.value,
             "target": o.target,
             "supported_from": o.supported_from,
+            "coast": o.coast,
         }
         for o in orders
     ]
@@ -71,9 +68,7 @@ def _serialise_outcomes(outcomes: list) -> list:
             "players": [p.value for p in o.commitment.players],
             "kept": o.kept,
             "broken_by": [p.value for p in o.broken_by],
-            # A replay that records only the verdict cannot say whether the
-            # broken promise was public, or bound three people, which is most
-            # of what makes the verdict interesting.
+            # The deal's shape as well as the verdict.
             "private": o.commitment.private,
             "pact": len(o.commitment.players) > 2,
         })
@@ -91,6 +86,9 @@ def _serialise_traces(traces: dict) -> dict:
             "penalty": trace.penalty,
             "explanation": trace.explanation,
             "commitment_broken": trace.commitment_broken,
+            "search": getattr(trace, "search", None),
+            "mixed": [round(p, 4) for _c, p in getattr(trace, "mixed", [])],
+            "exploitability": getattr(trace, "exploitability", None),
         }
     return out
 
@@ -137,6 +135,7 @@ def save_replay(
     directory: str = "replays",
     filename: Optional[str] = None,
     board: Optional[dict] = None,
+    result: Optional[dict] = None,
 ) -> str:
     """Save a full game replay to a JSON file.
 
@@ -146,6 +145,7 @@ def save_replay(
         directory: directory to save into
         filename: optional filename; defaults to timestamp-based name
         board: the board played on, as `Board.to_dict()`; defaults to active
+        result: GameRunner.result(), who won or shared the game
 
     Returns:
         The path of the saved replay file.
@@ -168,18 +168,23 @@ def save_replay(
             # replay that drops the messages cannot show why a deal existed.
             "messages": _serialise_messages(step.messages),
             "beliefs": _serialise_beliefs(step.beliefs),
-            # The deals live at the time, not just the ones graded. Without
-            # these a replay cannot show what was on the table during a turn
-            # nobody broke anything.
+            # Every deal live that turn, not just the graded ones.
             "commitments": [_serialise_commitment(c) for c in step.commitments],
             "nodes": {p.value: n for p, n in (step.nodes or {}).items()},
             "total_nodes": {p.value: n for p, n in (step.total_nodes or {}).items()},
+            "intents": [{"sender": m.sender.value, "from": m.supported_from,
+                         "to": m.target_territory, "carried_out": done}
+                        for m, done in step.intents],
+            "slipped": _serialise_orders(step.slipped),
         })
 
     replay = {
         # 2: turn records carry messages, beliefs, live deals, search cost.
         # 3: the board is saved with the game.
-        "version": 3,
+        # 4: intents, slipped orders, search traces and the game's result.
+        # 5: unit types, coasts and fleet moves.
+        "version": 5,
+        "result": result,
         "board": board if board is not None else active().to_dict(),
         "turns": len(turns_data),
         "final_state": _serialise_state(final_state),
@@ -220,15 +225,17 @@ def reconstruct_commitments(replay: dict) -> List[List[Commitment]]:
     return out
 
 
+def _unit(u: dict) -> Unit:
+    return Unit(player=Player(u["player"]), territory=u["territory"],
+                unit_type=UnitType(u.get("unit_type", "Army")), coast=u.get("coast"))
+
+
 def reconstruct_states(replay: dict) -> List[GameState]:
     """Reconstruct GameState objects from a loaded replay."""
     states = []
     for turn_data in replay["history"]:
         sd = turn_data["state"]
-        units = [
-            Unit(player=Player(u["player"]), territory=u["territory"])
-            for u in sd["units"]
-        ]
+        units = [_unit(u) for u in sd["units"]]
         supply_centers = {
             k: (Player(v) if v else None)
             for k, v in sd["supply_centers"].items()
@@ -246,10 +253,7 @@ def reconstruct_states(replay: dict) -> List[GameState]:
 
     # Also reconstruct final state
     fsd = replay["final_state"]
-    units = [
-        Unit(player=Player(u["player"]), territory=u["territory"])
-        for u in fsd["units"]
-    ]
+    units = [_unit(u) for u in fsd["units"]]
     supply_centers = {
         k: (Player(v) if v else None)
         for k, v in fsd["supply_centers"].items()

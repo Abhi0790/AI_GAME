@@ -15,11 +15,11 @@ from src.common.schemas import (
     Message, MessageType, message_to_commitment, invalid_proposal_reason,
     exchange_leg_due, commitment_key,
 )
-from src.engine.adjudicator import resolve, verify_commitments
+from src.engine.adjudicator import verify_commitments
 from src.engine.runner import GameRunner
 from src.engine.board import get_all_territories, ring_board, use_board
 from src.agents.agent import Agent
-from src.agents.trust.model import TrustModel, PAIR_SHRINKAGE
+from src.agents.trust.model import TrustModel
 
 R, B, G, Y = Player.RED, Player.BLUE, Player.GREEN, Player.GOLD
 TERRITORIES = get_all_territories()
@@ -602,7 +602,7 @@ class TestDirectionalDealsSurviveNegotiation:
 
         ns = NegotiationStrategy.__new__(NegotiationStrategy)
         ns.player = Player.BLUE
-        counter = NegotiationStrategy._counter_terms(ns, offer)
+        counter = NegotiationStrategy._counter_offers(ns, offer)[-1]
         countered = message_to_commitment(counter, Player.RED, 1)
 
         assert straight.players[0] == Player.RED

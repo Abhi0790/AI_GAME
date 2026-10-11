@@ -3,7 +3,7 @@ export const VIEWBOX = 500;
 
 export const COLOR = {
   Red: "#d4605a", Blue: "#5b8fd6", Green: "#5aa878", Gold: "#c9a24a",
-  Purple: "#9b7fd4", Orange: "#d68a4e", Teal: "#4fa8a8", Pink: "#d478a8",
+  Purple: "#c04fd0", Orange: "#d68a4e", Teal: "#4fa8a8", Pink: "#d478a8",
 };
 
 export const fmt = (n, places = 2) =>
@@ -18,6 +18,7 @@ export const orderText = (o) => {
   const u = o.unit_territory ?? o.unit;
   const type = o.order_type ?? o.type;
   if (type === "Hold") return `${u} H`;
-  if (type === "Move") return `${u}→${o.target}`;
+  if (type === "Move") return `${u}→${o.target}${o.coast ? "/" + o.coast : ""}`;
+  if (type === "Convoy") return `${u} C ${o.supported_from}→${o.target}`;
   return `${u} S ${o.supported_from ? o.supported_from + "→" : ""}${o.target}`;
 };

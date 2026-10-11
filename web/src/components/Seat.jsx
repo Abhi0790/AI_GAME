@@ -7,7 +7,7 @@ import { COLOR } from "../constants.js";
  * so a human seat cannot submit something the adjudicator would throw away.
  */
 export default function Seat({ seat, turn, pending, choices, setChoices,
-                               orders, setOrders }) {
+                               orders, setOrders, draws }) {
   const proposals = pending?.proposals ?? [];
   const legal = pending?.legal ?? {};
 
@@ -17,6 +17,13 @@ export default function Seat({ seat, turn, pending, choices, setChoices,
         Your seat — <span style={{ color: COLOR[seat] }}>{seat}</span> · turn {turn}
       </h3>
       <div className="body">
+        {draws && (
+          <label className="field">
+            <input type="checkbox" checked={!!choices.__draw__}
+                   onChange={(e) => setChoices({ ...choices, __draw__: e.target.checked })} />
+            <span>Vote for a draw after this turn</span>
+          </label>
+        )}
         {!proposals.length && (
           <div className="empty">Nobody has offered you anything.</div>
         )}
@@ -76,6 +83,7 @@ export function collectOrders(pending, orders) {
       order_type: o.order_type,
       target: o.target,
       supported_from: o.supported_from,
+      coast: o.coast,
     };
   });
 }

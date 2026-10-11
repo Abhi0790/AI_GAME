@@ -1,38 +1,96 @@
-from typing import List, Set, Tuple
+from typing import List, Tuple
 import itertools
 import random
 import zlib
-from src.common.schemas import GameState, Order, OrderType, Player, Unit
-from src.engine.board import active, get_adjacent
+from src.common.schemas import GameState, Order, OrderType, Player, Unit, UnitType
+from src.engine.board import active, province, unit_moves, can_reach, convoy_reach, is_land
+from src.engine.adjudicator import fleet_seas, could_move
 
-def generate_orders_for_unit(state: GameState, unit: Unit) -> List[Order]:
-    orders = []
-    # Hold
-    orders.append(Order(player=unit.player, unit_territory=unit.territory, order_type=OrderType.HOLD))
-    
-    adj = get_adjacent(unit.territory)
-    # Move
-    for a in adj:
-        orders.append(Order(player=unit.player, unit_territory=unit.territory, order_type=OrderType.MOVE, target=a))
-        
-    # Support
-    for a in adj:
-        # Can support a hold in an adjacent territory if there is a unit there
-        target_unit = state.get_unit_at(a)
-        if target_unit:
-            orders.append(Order(player=unit.player, unit_territory=unit.territory, order_type=OrderType.SUPPORT, target=a))
-            
-        # Can support a move INTO an adjacent territory
-        # We need to know who might move there. Since we generate independent orders, we can just say "Support any move into A from any adjacent of A"
-        # To constrain action space, we only generate supports for actual units that could move there.
-        adj_of_a = get_adjacent(a)
-        for origin in adj_of_a:
-            if origin != unit.territory:
-                origin_unit = state.get_unit_at(origin)
-                if origin_unit:
-                    orders.append(Order(player=unit.player, unit_territory=unit.territory, order_type=OrderType.SUPPORT, target=a, supported_from=origin))
-                    
+
+def generate_orders_for_unit(state: GameState, unit: Unit, by_sea: bool = True) -> List[Order]:
+    """Hold, every move, every support, and for a fleet at sea every convoy.
+    `by_sea=False` leaves out an army's convoyed moves (paired with a fleet instead)."""
+    def order(kind, target=None, frm=None, coast=None):
+        return Order(player=unit.player, unit_territory=unit.territory, order_type=kind,
+                     target=target, supported_from=frm, coast=coast)
+
+    orders = [order(OrderType.HOLD)]
+    steps = unit_moves(unit)
+    for loc in steps:
+        coast = loc.partition("/")[2] or None
+        orders.append(order(OrderType.MOVE, province(loc), coast=coast))
+    seas = fleet_seas(state)
+    if unit.unit_type == UnitType.ARMY and by_sea:
+        reached = {province(loc) for loc in steps}
+        orders += [order(OrderType.MOVE, t) for t in sorted(convoy_reach(unit.territory, seas))
+                   if t not in reached]
+
+    reach = list(dict.fromkeys(province(loc) for loc in steps))
+    for a in reach:
+        if state.get_unit_at(a):
+            orders.append(order(OrderType.SUPPORT, a))
+        for origin in active().adjacency[a]:
+            other = state.get_unit_at(origin)
+            if origin != unit.territory and other and can_reach(other, a):
+                orders.append(order(OrderType.SUPPORT, a, origin))
+        if seas:
+            orders += [order(OrderType.SUPPORT, a, other.territory) for other in state.units
+                       if other.unit_type == UnitType.ARMY and other.territory != unit.territory
+                       and not can_reach(other, a) and could_move(state, other.territory, a)]
+
+    if unit.unit_type == UnitType.FLEET and not is_land(unit.territory):
+        for army in state.units:
+            if army.unit_type == UnitType.ARMY and unit.territory in _chain(army.territory, seas):
+                orders += [order(OrderType.CONVOY, t, army.territory)
+                           for t in sorted(convoy_reach(army.territory, seas))]
     return orders
+
+
+def order_label(o: Order) -> str:
+    """One order in words."""
+    to = f"{o.target}/{o.coast}" if o.coast else o.target
+    if o.order_type == OrderType.HOLD:
+        return f"{o.unit_territory} holds"
+    if o.order_type == OrderType.MOVE:
+        return f"{o.unit_territory} -> {to}"
+    if o.order_type == OrderType.CONVOY:
+        return f"{o.unit_territory} convoys {o.supported_from} -> {o.target}"
+    if o.supported_from:
+        return f"{o.unit_territory} supports {o.supported_from} -> {o.target}"
+    return f"{o.unit_territory} supports {o.target} holding"
+
+
+def _convoy_pairs(unit_orders: List[List[Order]], seen: set) -> List[List[Order]]:
+    """Every unit holds but one army and the fleet carrying it, both ordered."""
+    baseline = [opts[0] for opts in unit_orders]
+    at = {opts[0].unit_territory: j for j, opts in enumerate(unit_orders)}
+    out = []
+    for i, opts in enumerate(unit_orders):
+        for o in opts:
+            j = at.get(o.supported_from) if o.order_type == OrderType.CONVOY else None
+            if j is None or o.target not in convoy_reach(o.supported_from, {o.unit_territory}):
+                continue
+            comb = list(baseline)
+            comb[i] = o
+            comb[j] = Order(player=o.player, unit_territory=o.supported_from,
+                            order_type=OrderType.MOVE, target=o.target)
+            if tuple(comb) not in seen:
+                seen.add(tuple(comb))
+                out.append(comb)
+    return out
+
+
+def _chain(land: str, seas: set) -> set:
+    """Fleet-held seas connected to a coastal province."""
+    adj = active().adjacency
+    reached = {s for s in adj.get(land, []) if s in seas}
+    frontier = list(reached)
+    while frontier:
+        for n in adj[frontier.pop()]:
+            if n in seas and n not in reached:
+                reached.add(n)
+                frontier.append(n)
+    return reached
 
 
 def _signature(state: GameState) -> Tuple:
@@ -42,23 +100,13 @@ def _signature(state: GameState) -> Tuple:
             active().fingerprint)
 
 
-# Enumeration is pure in (occupancy, player) and the planner asks for the same
-# player's sets dozens of times per turn while sampling. One dict turns that
-# back into one call.
+# Enumeration is pure in (occupancy, player), so it is cached.
 _SETS_CACHE: dict = {}
 _CACHE_LIMIT = 256
 
-# Two units give ~81 joint order sets; five give ~59,000, and the planner
-# scores every one of them twice while pruning. The cartesian product is only
-# tractable at the opening, so past the cap the set is sampled instead of
-# enumerated — the whole-hold set and every single-unit action are always kept,
-# because those are the ones a human would check first.
-#
-# The sample is seeded from the position, so the cache is a pure function and
-# consuming it never shifts the game's random stream.
-#
-# ponytail: uniform sampling above the cap. If late-game play looks weak,
-# bias the sample by the opponent model before making the cap bigger.
+# Past this many joint sets, sample (seeded by position) instead of enumerating,
+# always keeping the all-hold set and every single-unit action.
+# ponytail: uniform sampling above the cap; bias by the opponent model if late-game play looks weak.
 MAX_ORDER_SETS = 300
 
 
@@ -72,7 +120,7 @@ def generate_all_order_sets(state: GameState, player: Player) -> List[List[Order
     if not units:
         result = [[]]
     else:
-        unit_orders = [generate_orders_for_unit(state, u) for u in units]
+        unit_orders = [generate_orders_for_unit(state, u, by_sea=False) for u in units]
         total = 1
         for opts in unit_orders:
             total *= len(opts)
@@ -96,6 +144,8 @@ def generate_all_order_sets(state: GameState, player: Player) -> List[List[Order
                 if tuple(comb) not in seen:
                     seen.add(tuple(comb))
                     result.append(comb)
+
+        result += _convoy_pairs(unit_orders, {tuple(c) for c in result})
 
     if len(_SETS_CACHE) > _CACHE_LIMIT:
         _SETS_CACHE.clear()

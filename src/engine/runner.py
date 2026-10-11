@@ -6,18 +6,18 @@ from typing import List, Dict, Optional
 
 from src.common.schemas import (
     GameState, Order, OrderType, Player, Commitment, CommitmentType, Message, MessageType,
-    Unit, CalibrationPoint, ReversalPoint, TurnRecord,
+    CalibrationPoint, ReversalPoint, TurnRecord,
 )
 from src.common.schemas import (
     message_to_commitment, commitment_key, invalid_proposal_reason, leaders,
-    obligated_parties, mirrors, exchange_leg_due,
+    obligated_parties, mirrors, exchange_leg_due, carried_out,
 )
 from src.engine import adjudicator
 from src.engine.adjudicator import resolve, verify_commitments
 from src.engine.orders import _SETS_CACHE, generate_orders_for_unit
 from src.engine.board import (
     get_all_territories, get_supply_centers, home_centers, win_centers, max_turns,
-    players,
+    players, active,
 )
 
 
@@ -27,8 +27,6 @@ AGENT_METHODS = ("propose", "reply", "act", "update_beliefs_from_outcomes",
                  "beliefs", "predict_keep")
 
 # Chance per turn that a private deal becomes known to each seat outside it.
-# 0 keeps secrets forever; 1 reproduces the old behaviour, where every agent
-# was handed every deal regardless of who signed it.
 PRIVATE_LEAK_RATE = 0.0
 
 # Chance that a unit's order is lost and it holds instead. Commitments are
@@ -58,18 +56,13 @@ class GameRunner:
         # (predicted P(keeps), what actually happened) pairs. The reliability
         # diagram and the Brier score are computed from nothing else.
         self.calibration: List[CalibrationPoint] = []
-        # (what a deal was worth at signature, what breaking it was worth at
-        # order time) for the same agent in the same turn. Both positive is a
-        # preference reversal.
+        # (worth at signature, worth of breaking at order time) per agent and turn.
         self.reversals: List[ReversalPoint] = []
         # Adjudications spent per turn, per player — the x-axis of the
         # search-variant figure.
         self.nodes_per_turn: List[Dict[Player, int]] = []
         # Initial state: one unit on each of a seat's home centres.
-        units = [
-            Unit(player=p, territory=t)
-            for p, homes in home_centers().items() for t in homes
-        ]
+        units = active().starting_units()
 
         supply_centers = {t: None for t in get_supply_centers()}
         for p, homes in home_centers().items():
@@ -95,6 +88,9 @@ class GameRunner:
         self._pact_signatures: Dict[str, set] = {}
         # Adjudications each seat has caused this turn, budgeted or not.
         self._work: Dict[Player, int] = {p: 0 for p in self.agents}
+        # Turns in a row without a centre changing hands, and who shared a draw.
+        self._stalled = 0
+        self.drawn: Optional[List[Player]] = None
 
     @contextmanager
     def _event_rng(self, key):
@@ -121,12 +117,7 @@ class GameRunner:
 
     # ── negotiation ─────────────────────────────────────────────────────
     def begin_turn(self) -> List[Message]:
-        """Generate this turn's opening proposals without playing the turn.
-
-        The web UI calls this to show a human seat what it has been offered
-        before asking for orders; `step()` then reuses exactly these messages
-        instead of generating a second, different set.
-        """
+        """This turn's opening proposals, generated once and reused by `step()`."""
         if self._opening is None:
             self._opening = [m for p, a in self.agents.items()
                              for m in self._charge(p, a.propose, self.state, self.visible_to(p),
@@ -134,12 +125,7 @@ class GameRunner:
         return self._opening
 
     def _negotiate(self, log_lines: List[str]) -> List[Message]:
-        """Run the negotiation rounds and return every sentence spoken.
-
-        Rounds 2 and 3 are no longer no-ops: a proposal that fails an agent's
-        expected-value test can come back as a COUNTER, which the other side
-        then answers.
-        """
+        """Run the negotiation rounds and return every sentence spoken."""
         new_messages = self.begin_turn()
         self._opening = None
         spoken: List[Message] = list(new_messages)
@@ -181,9 +167,7 @@ class GameRunner:
                     continue
 
                 if orig.coalition:
-                    # A pact is one promise, not a bundle of bilateral ones:
-                    # it comes into force only once every named member has
-                    # said yes, and until then it binds nobody.
+                    # A pact binds nobody until every member has said yes.
                     signed = self._pact_signatures.setdefault(orig.id, {orig.sender})
                     signed.add(rep.sender)
                     if not set(orig.coalition) <= signed:
@@ -199,9 +183,7 @@ class GameRunner:
                     continue
                 stuck = next((q for q in c.players if not self._keepable(q, c)), None)
                 if stuck:
-                    # Signing it would leave a player no order set that keeps
-                    # every promise it holds, so the next break is forced, not
-                    # chosen, and would be graded as a betrayal it never priced.
+                    # No order set could keep it alongside the player's live promises.
                     log_lines.append(
                         f"Deal dropped: {stuck.value} cannot keep a "
                         f"{c.commitment_type.value} deal alongside its live promises")
@@ -214,26 +196,18 @@ class GameRunner:
                     # a second copy that the planner would price twice.
                     existing.valid_until_turn = max(
                         existing.valid_until_turn, c.valid_until_turn)
-                    # An Exchange renewed on its old repayment date would owe
-                    # the repay leg for every remaining turn and never ask for
-                    # the support leg again — a bargain quietly turned into a
-                    # standing DMZ. Renewing the terms renews the date.
+                    # Renewing an Exchange renews its repayment date.
                     if c.repay_turn is not None:
                         existing.repay_turn = c.repay_turn
                         existing.valid_until_turn = max(
                             existing.valid_until_turn, c.repay_turn)
-                    # Publicity only travels one way. Once a promise has been
-                    # made in the open it cannot be walked back into the dark,
-                    # so re-proposing it privately does not hide it again.
+                    # Once public, a renewed deal stays public.
                     existing.private = existing.private and c.private
                     self._notify_signed(existing)
                 else:
                     self.commitments.append(c)
                     self._notify_signed(c)
-                    # Players in a fixed order, so the same pair always reads
-                    # the same way: "Blue & Red" and "Red & Blue" are one
-                    # relationship and printing both makes distinct deals look
-                    # like duplicates.
+                    # Players sorted, so a pair always prints the same way.
                     pair = " & ".join(sorted(p.value for p in c.players))
                     detail = (f" on {', '.join(c.dmz_territories)}"
                               if c.dmz_territories else "")
@@ -251,16 +225,23 @@ class GameRunner:
 
         return spoken
 
-    def _keepable(self, player: Player, c: Commitment) -> bool:
-        """Whether some order set this turn keeps c and every live promise of
-        player's, unless those were already unkeepable without c.
+    def _announce(self) -> List[Message]:
+        """Once the deals are struck, each seat may state an intended move;
+        everyone hears it through `reply`, which answers nothing."""
+        said = [m for p, a in self.agents.items() if hasattr(a, "announce")
+                for m in self._charge(p, a.announce, self.state, self.visible_to(p),
+                                      event_key=("announce", self.state.turn, p.value))]
+        if said:
+            for p, a in self.agents.items():
+                heard = [m for m in said if m.sender != p and m.receiver in (None, p)]
+                if heard:
+                    self._charge(p, a.reply, self.state, heard, self.visible_to(p),
+                                 event_key=("hear", self.state.turn, p.value))
+        return said
 
-        Only support promises require a particular order; alliances and DMZs
-        can always be honoured by holding. Assign each distinct required
-        support to a different unit that can legally give it. This is exact
-        even when the planner samples its much larger joint order space.
-        A future exchange repayment still needs a separate future-state check.
-        """
+    def _keepable(self, player: Player, c: Commitment) -> bool:
+        """Whether some order set keeps c and every live promise of player's (unless
+        those were unkeepable already), by matching required supports to units."""
         live = [e for e in self.commitments
                 if player in e.players and commitment_key(e) != commitment_key(c)]
 
@@ -366,9 +347,7 @@ class GameRunner:
 
     @staticmethod
     def _close_predictions(points: List[CalibrationPoint], outcomes: List):
-        # Keyed on the deal, not on (player, type): two live DMZs with the
-        # same partner are two separate promises, and breaking one must not
-        # mark the prediction about the other as wrong.
+        # Keyed on the deal, so two live deals with one partner are graded apart.
         broken = {(o.commitment.id, p) for o in outcomes if not o.kept
                   for p in o.broken_by}
         graded = {(o.commitment.id, p) for o in outcomes
@@ -398,13 +377,11 @@ class GameRunner:
             if hasattr(a, "decay_stance"):
                 a.decay_stance()
 
-        # 2. Negotiation rounds
-        # Said once, at the end, from log.events -- these lines are inserted
-        # at the front of it below, so the order is the same and the CLI no
-        # longer prints every negotiation line twice.
+        # 2. Negotiation rounds (their log lines go at the front of log.events).
         negotiation_lines: List[str] = []
         self._regime_change(negotiation_lines)
         messages = self._negotiate(negotiation_lines)
+        messages += self._announce()
 
         # 3. What every agent predicts about the deals now on the table
         predictions = self._open_predictions()
@@ -428,7 +405,8 @@ class GameRunner:
         all_orders, slipped = self._slip(all_orders)
 
         # 5. Engine resolves and grades commitments
-        new_state, outcomes, log = resolve(self.state, all_orders, self.commitments)
+        new_state, outcomes, log = resolve(self.state, all_orders, self.commitments,
+                                           chooser=self._choose)
         self._annotate(outcomes, intended if slipped else None, predictions)
         for line in negotiation_lines:
             log.events.insert(0, line)
@@ -444,15 +422,10 @@ class GameRunner:
 
         self.calibration.extend(self._close_predictions(predictions, outcomes))
 
-        # What was on the table *during* this turn, captured before anything
-        # is torn down. A pact formed and broken in the same turn really did
-        # exist, and a record written after the dissolution below would show
-        # it being broken without ever showing it being made.
+        # What was on the table during this turn, before broken deals dissolve.
         live_this_turn = list(self.commitments)
 
-        # A deal somebody walked out of does not keep binding the rest: a
-        # broken promise ends, for every party. Left standing, a two-way deal
-        # was "broken" again every turn of the war that followed.
+        # A broken deal ends for every party.
         dissolved = {o.commitment.id for o in outcomes if not o.kept}
         for cid in dissolved:
             broken = next(o for o in outcomes if o.commitment.id == cid)
@@ -468,8 +441,18 @@ class GameRunner:
         for l in log.events:
             say(l)
 
+        # Stated intentions, graded on what was executed, like promises.
+        intents = [(m, carried_out(m, all_orders)) for m in messages
+                   if m.message_type == MessageType.INTENT]
+        for m, done in intents:
+            log.events.append(f"Intent {'carried out' if done else 'not carried out'}: "
+                              f"{m.sender.value} {m.supported_from}->{m.target_territory}")
+
         # 7. Beliefs and opponent models update on what they witnessed
         for p, a in self.agents.items():
+            if hasattr(a, "observe_intents"):
+                a.observe_intents([(m, done) for m, done in intents
+                                   if m.sender != p and m.receiver in (None, p)])
             a.update_beliefs_from_outcomes(
                 self.state, new_state,
                 [o for o in outcomes if self.knows(p, o.commitment)])
@@ -482,13 +465,59 @@ class GameRunner:
             state=self.state, orders=all_orders, outcomes=outcomes, log=log,
             traces=traces, messages=messages, beliefs=beliefs,
             commitments=live_this_turn, nodes=nodes, total_nodes=dict(self._work),
-            intended=intended, slipped=slipped,
+            intended=intended, slipped=slipped, intents=intents,
         )
         self._work = {p: 0 for p in self.agents}
         self.history.append(record)
         self.nodes_per_turn.append(nodes)
+        self._stalled = (self._stalled + 1
+                         if new_state.supply_centers == self.state.supply_centers else 0)
         self.state = new_state
+        self._vote_draw(log)
         return record
+
+    def survivors(self) -> List[Player]:
+        """Seats with a unit or a centre left."""
+        return [p for p in self.agents
+                if any(u.player == p for u in self.state.units)
+                or p in self.state.supply_centers.values()]
+
+    def _vote_draw(self, log) -> None:
+        """With draws on, every survivor votes; a unanimous yes ends the game
+        shared among them (DIAS). Agents without `vote_draw` vote no."""
+        if not getattr(getattr(self, "config", None), "draws", False) or self.winner():
+            return
+        alive = self.survivors()
+        yes = [p for p in alive if hasattr(self.agents[p], "vote_draw") and self._charge(
+            p, self.agents[p].vote_draw, self.state, self._stalled,
+            event_key=("draw", self.state.turn, p.value))]
+        if yes and len(yes) == len(alive):
+            self.drawn = sorted(alive, key=lambda p: p.value)
+            log.events.append(f"Draw agreed by {', '.join(p.value for p in self.drawn)}")
+        elif yes:
+            log.events.append(f"Draw proposed by {', '.join(sorted(p.value for p in yes))}; "
+                              f"refused by {', '.join(sorted(p.value for p in alive if p not in yes))}")
+
+    def result(self) -> dict:
+        """Who won outright, or who shared the game and whether by a draw."""
+        champion = self.winner()
+        return {"winner": champion.value if champion else None,
+                "drawn": bool(self.drawn),
+                "leaders": sorted(p.value for p in self.leaders())}
+
+    def over(self) -> bool:
+        """Won outright, drawn, or past the turn limit."""
+        return bool(self.winner() or self.drawn or self.state.turn > self.max_turns)
+
+    def _choose(self, player: Player, kind: str, options: List[str], count: int,
+                state: GameState, turn: int) -> List[str]:
+        """Ask the seat for its retreat, build or disband; agents without
+        `choose` get the engine's default."""
+        agent = self.agents[player]
+        if not hasattr(agent, "choose"):
+            return adjudicator.default_choice(player, kind, options, count, state, turn)
+        return self._charge(player, agent.choose, kind, options, count, state,
+                            event_key=(kind, turn, player.value))
 
     def _regime_change(self, log_lines: List[str]):
         """Swap a seat's persona on the turn GameConfig.regime_change names."""
@@ -510,11 +539,8 @@ class GameRunner:
             o.tempted = [p for p in o.commitment.players if (o.commitment.id, p) in tempted]
 
     def _slip(self, orders: List[Order]):
-        """Replace each non-hold order with a hold at rate ORDER_NOISE.
-
-        Drawn from crc32 of (seed, turn, unit), so noise neither consumes nor
-        shifts the game's random stream.
-        """
+        """Replace each non-hold order with a hold at rate ORDER_NOISE, drawn from
+        crc32 so the game's random stream is untouched."""
         if ORDER_NOISE <= 0:
             return orders, []
         seed = getattr(getattr(self, "config", None), "seed", 0)
@@ -529,13 +555,8 @@ class GameRunner:
         return executed, slipped
 
     def _reversals(self, player: Player, agent, trace) -> List[ReversalPoint]:
-        """Pair each deal this agent signed with what its planner then did.
-
-        The negotiator and the planner price the same promise minutes apart in
-        the same turn, against different models of the partner. Only deals the
-        agent actually put a price on are paired; a deal it inherited without
-        pricing has no signature figure to compare against.
-        """
+        """Pair each deal this agent priced and signed this turn with its planner's
+        break advantage."""
         negotiation = getattr(agent, "negotiation", None)
         prices = getattr(negotiation, "deal_prices", None)
         if not prices:
@@ -556,8 +577,9 @@ class GameRunner:
         return counts
 
     def leaders(self):
-        """Every seat tied for the most centres."""
-        return leaders(self.center_counts())
+        """Who shares the result: the draw's survivors, else every seat tied
+        for the most centres."""
+        return list(self.drawn) if self.drawn else leaders(self.center_counts())
 
     def winner(self):
         """The one seat that has won outright, else None.
@@ -578,6 +600,10 @@ class GameRunner:
                 if verbose:
                     print(f"Game Over: {champion.value} reached {self.win_centers} centres "
                           f"on turn {self.state.turn - 1}")
+                break
+            if self.drawn:
+                if verbose:
+                    print(f"Game Over: draw among {', '.join(p.value for p in self.drawn)}")
                 break
         else:
             if verbose:

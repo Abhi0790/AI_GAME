@@ -46,7 +46,7 @@ def test_every_adjudication_is_charged_to_a_seat():
             assert n <= runner.config.node_budget
 
 
-@pytest.mark.parametrize("search", ["expectiminimax", "mcts"])
+@pytest.mark.parametrize("search", ["expectimax", "mcts", "regret"])
 def test_both_searches_respect_a_small_budget(search):
     budget = 60
     runner = play(GameConfig(seed=6, max_turns=2,

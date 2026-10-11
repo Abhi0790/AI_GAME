@@ -1,15 +1,10 @@
-"""Negotiation — the closed grammar, priced by the planner.
+"""Negotiation: the closed grammar, priced by the planner.
 
-Nothing here decides anything on a trust threshold any more. A deal is worth
-proposing when the planner says the board is better with it honoured than
-without it, and worth accepting when
-
-    P(keep) * V_kept + (1 - P(keep)) * V_broken  >  V_none
-
-with my own exposure counted inside V_broken: in that branch I am the one
-keeping my side of a deal the other player is walking away from.
+Accept when P(keep) * V_kept + (1 - P(keep)) * V_broken > V_none.
 """
 
+from itertools import combinations
+from math import prod
 from typing import List, Dict, Optional, Tuple
 import uuid
 
@@ -19,7 +14,7 @@ from src.common.schemas import (
     invalid_proposal_reason, commitment_key,
 )
 from src.agents.planner.planner import (
-    Planner, evaluate_state, cooperation_value, hostile_world,
+    Planner, PlannerConfig, evaluate_state, cooperation_value, hostile_world,
     breaks_commitment, defection_incentive, near_win, CENTRE_VALUE,
 )
 from src.agents.trust.model import TrustModel
@@ -35,6 +30,8 @@ MAX_PROPOSALS_PER_OPPONENT = 2
 PACT_DEFICIT = 2
 # A threat repeated every turn is noise, and the receiver stops pricing it.
 THREAT_COOLDOWN = 3
+# Most-trusted allies considered for a pact; every pair of them is priced.
+PACT_SHORTLIST = 4
 
 
 class NegotiationStrategy:
@@ -43,22 +40,14 @@ class NegotiationStrategy:
         self.planner = planner
         # Threats I have sent, so I know which ones I am on the hook for.
         self.threats_made: Dict[Player, int] = {}
-        # The deals already on the table this turn. The Agent refreshes it
-        # before every call; pricing a new offer means pricing it against
-        # what I am already committed to.
+        # The deals already on the table this turn, refreshed by the Agent.
         self._live_commitments: List[Commitment] = []
-        # Pruning the candidate set is the expensive part of pricing a deal,
-        # and it is identical for every deal considered in the same position.
-        # Memoised per (turn, live deals); a dozen offers then cost one prune.
+        # Pruned candidates, memoised per (turn, live deals, position).
         self._candidate_memo: Tuple = (None, None)
         # Set by the Agent from the persona: how readily this player keeps a
         # deal off the public record.
         self.privacy_preference: float = 0.0
-        # What I thought each deal was worth when I put my name to it, keyed
-        # on the deal's identity rather than the message id so a renewal or a
-        # counter-offer still finds the price I originally paid. Read back by
-        # the runner against what the planner does with the same deal in the
-        # same turn.
+        # What each deal was worth when I signed it, keyed on the deal's identity.
         self.deal_prices: Dict[tuple, float] = {}
         # ...and on which turn I put my name to it, so the planner can charge
         # the *unused* share of that price back when it walks away.
@@ -69,6 +58,12 @@ class NegotiationStrategy:
         # Players the persona's policy signs nothing with this turn. The Agent
         # refreshes it before every call (Agent.policy).
         self.refuse: set = set()
+        # Partners I expect to refuse me (Agent.expects_refusal): no offers.
+        self.rebuffed: set = set()
+        # My promise-keeping as each partner sees it (Agent.standing_with),
+        # and a negotiator per partner seat for pricing a deal from their side.
+        self.standing: Dict[Player, float] = {}
+        self._mirrors: Dict[Player, "NegotiationStrategy"] = {}
         # Whether my persona owes its partners loyalty (Agent.policy). A bound
         # player cannot sign with everyone and still grow, so it signs less.
         self.bound: bool = False
@@ -97,14 +92,7 @@ class NegotiationStrategy:
     def _best_plan(self, state: GameState, candidates: List[List[Order]],
                    worlds: List[List[Order]], weights: List[float],
                    commitments: List[Commitment]) -> Tuple[List[Order], float]:
-        """The single plan I would actually play, and what it scores.
-
-        One plan across all the worlds, not a fresh best reply per world. The
-        difference matters: choosing with hindsight inside each world makes a
-        partner's peace worth exactly nothing, because I could always have
-        defended perfectly against an attack I already knew was coming. It is
-        committing to *one* plan that a promise changes.
-        """
+        """The one plan I would play across all the weighted worlds, and its score."""
         best, best_score = None, float("-inf")
         for cand in candidates:
             score = sum(w * self._value_of(state, cand, world, commitments)
@@ -116,13 +104,7 @@ class NegotiationStrategy:
         return best, best_score
 
     def _partners_of(self, deal: Optional[Commitment], partner: Player) -> List[Player]:
-        """Everyone whose behaviour the deal is supposed to change.
-
-        For a pact that is all the other members, not just whoever proposed
-        it: a three-way alliance is worth roughly twice a two-way one, and
-        pricing it against a single partner understated it so badly that
-        coalitions were almost never accepted.
-        """
+        """Everyone whose behaviour the deal changes: all other members of a pact."""
         if deal is not None and len(deal.players) > 2:
             return [p for p in deal.players if p != self.player]
         return [partner]
@@ -143,19 +125,14 @@ class NegotiationStrategy:
         mine = {u.territory for u in state.units if u.player == self.player}
         mine |= {t for t, owner in state.supply_centers.items() if owner == self.player}
 
-        # What "honouring" means for the partner depends on which side of the
-        # deal they are on. In an exchange I give the support and they repay
-        # later by staying out of somewhere, so their kept-world behaviour is
-        # the repayment, not a support order.
+        # In an exchange the partner honours by repaying (staying out), not by supporting.
         owed = set(deal.dmz_territories or []) if (
             deal is not None and deal.commitment_type == CommitmentType.EXCHANGE) else set()
 
         for u in partner_units:
             partner = u.player
             if owed and partner == (deal.players[1] if deal else partner):
-                # Honouring the repayment: anywhere but the squares they owe
-                # me. Breaking it: straight into one of them, which is the
-                # whole reason the repayment was worth asking for.
+                # Honouring: anywhere but the owed squares. Breaking: into one of them.
                 clear = [a for a in get_adjacent(u.territory) if a not in owed]
                 kept.append(Order(player=partner, unit_territory=u.territory,
                                   order_type=OrderType.MOVE if clear else OrderType.HOLD,
@@ -194,13 +171,8 @@ class NegotiationStrategy:
 
     def deal_values(self, state: GameState, deal: Commitment, partner: Player,
                     commitments: List[Commitment]) -> Tuple[float, float, float]:
-        """(V_none, V_kept, V_broken) for one candidate deal.
-
-        V_none is what I can do with no deal at all — every order set open to
-        me. V_kept and V_broken are restricted to the order sets that honour
-        the deal, because that restriction *is* the price of signing, and it
-        is exactly what makes V_broken worse than V_none.
-        """
+        """(V_none, V_kept, V_broken) for one candidate deal; the last two are
+        restricted to order sets that honour it."""
         free = self._candidates(state, commitments)
         with_deal = commitments + [deal]
         honouring = [c for c in free
@@ -211,15 +183,11 @@ class NegotiationStrategy:
         kept_world, broken_world = self._worlds(state, partner, deal)
         worlds = [kept_world, broken_world]
 
-        # No deal: the partner is committed to nothing, so I hedge — one plan,
-        # chosen against both pictures of them at once, with my own orders
-        # unconstrained.
+        # No deal: one unconstrained plan hedged against both pictures of them.
         _plan, v_none = self._best_plan(state, free, worlds, [0.5, 0.5], commitments)
 
-        # With the deal I plan for the partner honouring it, and I give up the
-        # order sets that would break my own side. V_broken is that same plan
-        # meeting a partner who walks away: my exposure is the plan I can no
-        # longer un-choose, which is exactly what signing costs.
+        # With the deal: an honouring plan for a partner who keeps; V_broken is
+        # that same plan against a partner who walks away.
         plan, _ = self._best_plan(state, honouring, worlds, [1.0, 0.0], with_deal)
         v_kept = self._value_of(state, plan, kept_world, with_deal)
         v_broken = self._value_of(state, plan, broken_world, with_deal)
@@ -227,19 +195,8 @@ class NegotiationStrategy:
 
     def deal_totals(self, state: GameState, deal: Commitment, partner: Player,
                     commitments: List[Commitment]) -> Tuple[float, float, float]:
-        """(V_none, V_kept, V_broken) over the whole life of the deal.
-
-        The per-turn counterfactual cannot see a three-turn alliance: it
-        prices one turn of a promise that is supposed to buy several, which
-        is why nothing was ever worth proposing at the opening. Two changes:
-
-          * the per-turn gap is carried over the turns the deal runs for;
-          * the kept branch picks up Vcoop, discounted by the same
-            turns-left/12 horizon the planner charges for breaking it.
-
-        Making a promise and breaking one are then priced with the same
-        quantity, which is the only way the two decisions can be consistent.
-        """
+        """(V_none, V_kept, V_broken) over the deal's life: per-turn values times its
+        turns, plus Vcoop x turns / max turns on the kept branch."""
         v_none, v_kept, v_broken = self.deal_values(state, deal, partner, commitments)
         # valid_until_turn is the last turn the deal is graded, inclusive.
         turns = max(1, deal.valid_until_turn - state.turn + 1)
@@ -247,36 +204,33 @@ class NegotiationStrategy:
                    for q in self._partners_of(deal, partner)) * turns / max_turns()
         return turns * v_none, turns * v_kept + coop, turns * v_broken
 
-    def exposure(self, state: GameState, partner: Player) -> float:
-        """How much of mine sits inside their reach, normalised.
+    def their_surplus(self, state: GameState, deal: Commitment, partner: Player,
+                      commitments: List[Commitment]) -> float:
+        """What the deal is worth to the partner over no deal, priced from
+        their seat with my standing in their eyes as P(I keep). Positive is
+        what their acceptance test (evaluate_proposal) asks for."""
+        mirror = self._mirrors.get(partner)
+        if mirror is None:
+            mirror = self._mirrors[partner] = NegotiationStrategy(
+                partner, Planner(partner, PlannerConfig()))
+        mirror._live_commitments = commitments
+        v_none, v_kept, v_broken = mirror.deal_totals(state, deal, self.player, commitments)
+        s = self.standing.get(partner, 0.5)
+        return s * v_kept + (1 - s) * v_broken - v_none
 
-        A standing position, not a temptation: it says whether this player is
-        worth talking to at all, and it is what a threat is aimed at.
-        """
+    def exposure(self, state: GameState, partner: Player) -> float:
+        """How much of mine sits inside their reach, normalised to [0, 1]."""
         return min(1.0, cooperation_value(state, partner, self.player) / (2 * CENTRE_VALUE))
 
     def their_incentive(self, state: GameState, partner: Player,
                         deal: Optional[Commitment] = None) -> float:
-        """What breaking is worth to *them* this turn — the incentive node of
-        the trust network.
-
-        The same estimator the calibration log records, so the probability a
-        deal is accepted on is the probability that gets graded afterwards.
-        Exposure was standing in for this and turned out to carry no signal
-        about whether anyone actually broke anything.
-        """
+        """What breaking is worth to them this turn: the trust network's incentive node."""
         live = list(self._live_commitments) + ([deal] if deal is not None else [])
         return defection_incentive(state, partner, live)
 
     def overcommits(self, state: GameState, deal: Commitment) -> bool:
-        """Would a bound player be signing away its growth?
-
-        Two ways, and only for a bound player: a second two-way alliance (a
-        pact against a leader is exempt), or a promise to stay out of a centre
-        it does not own but can reach -- a DMZ, or the repay leg of an exchange.
-        With every neighbour allied and every contested centre demilitarised,
-        a player who keeps its word has nothing left to take.
-        """
+        """For a bound player: a second two-way alliance, or a promise to stay out
+        of a reachable centre it does not own."""
         if not self.bound:
             return False
         if deal.commitment_type == CommitmentType.ALLIANCE and len(deal.players) == 2:
@@ -310,10 +264,7 @@ class NegotiationStrategy:
 
         offers.append(msg(commitment_type=CommitmentType.ALLIANCE, turns=3))
 
-        # DMZ on the centres we both border and *neither of us owns*. Without
-        # the second half this proposed demilitarising the other player's own
-        # home centre, which is not contested ground — it is just asking them
-        # to stop reinforcing their border.
+        # DMZ on centres we both border and neither of us owns.
         contested = {
             t for u in my_units for t in get_adjacent(u.territory)
             if is_supply_center(t)
@@ -333,9 +284,7 @@ class NegotiationStrategy:
                                       target_territory=adj, supported_from=ou.territory))
                     break
 
-        # Support a hold: I promise to prop up a centre of theirs that is
-        # under pressure. Third sentence of the grammar, previously unsayable
-        # because nothing ever generated a SUPPORT with no origin.
+        # Support a hold on a centre of theirs next to my units.
         for ou in their_units:
             if any(ou.territory in get_adjacent(mu.territory) for mu in my_units) \
                     and is_supply_center(ou.territory):
@@ -343,10 +292,7 @@ class NegotiationStrategy:
                                   target_territory=ou.territory))
                 break
 
-        # An exchange: I support their move this turn, and next turn they
-        # keep out of somewhere I want. The two halves are worth different
-        # amounts and fall due on different turns, which is the only way to
-        # trade something I have now for something I want later.
+        # An exchange: I support their move now; next turn they keep out of somewhere I want.
         repayment = sorted({
             t for u in my_units for t in get_adjacent(u.territory)
             if is_supply_center(t)
@@ -366,10 +312,7 @@ class NegotiationStrategy:
                                   repay_turn=state.turn + 1))
                 break
 
-        # Anything aimed at a third party is worth keeping quiet: announcing
-        # it warns the target. A private deal also cannot be proved either way
-        # afterwards, which is a cost to the honest and an opportunity to the
-        # rest -- so the willingness to go private tracks the persona.
+        # Deals aimed at a third party go private; otherwise privacy follows the persona.
         for offer in offers:
             targets_a_third_party = (
                 offer.commitment_type in (CommitmentType.SUPPORT, CommitmentType.EXCHANGE)
@@ -385,14 +328,7 @@ class NegotiationStrategy:
     # Multi-party pacts
     # ------------------------------------------------------------------
     def _pact_offers(self, state: GameState, trust_model: TrustModel) -> List[Message]:
-        """A three-way pact against whoever is running away with the game.
-
-        Two players behind the leader can each hold their own bilateral deal
-        and still be picked off one at a time. The point of a pact is that it
-        is a single promise: it only forms if everybody signs, and the moment
-        one member breaks it the others are released rather than left bound
-        to a coalition that no longer exists.
-        """
+        """A three-way pact against a runaway leader, formed only if all sign."""
         counts = {p: 0 for p in players()}
         for owner in state.supply_centers.values():
             if owner:
@@ -407,23 +343,42 @@ class NegotiationStrategy:
         # Everyone else who is also behind, most trustworthy first.
         allies = sorted(
             (p for p in alive if p not in (self.player, leader)
-             and counts[p] < counts[leader] and p not in self.refuse),
+             and counts[p] < counts[leader] and p not in self.refuse | self.rebuffed),
             key=lambda p: -trust_model.get_reliability(
-                p, CommitmentType.ALLIANCE, toward=self.player))
-        if len(allies) < 2:
+                p, CommitmentType.ALLIANCE, toward=self.player))[:PACT_SHORTLIST]
+
+        # The pair whose pact has the largest Nash product of all three surpluses.
+        commitments = self._live_commitments
+        pact_id = str(uuid.uuid4())
+        best = None
+        for pair in combinations(allies, 2):
+            members = [self.player, *pair]
+            probe = Message(id=pact_id, sender=self.player, receiver=pair[0],
+                            message_type=MessageType.PROPOSE,
+                            commitment_type=CommitmentType.ALLIANCE, turns=3,
+                            coalition=members)
+            deal = message_to_commitment(probe, pair[0], state.turn)
+            v_none, v_kept, _v_broken = self.deal_totals(state, deal, pair[0], commitments)
+            gain = v_kept - v_none
+            if gain <= MIN_DEAL_VALUE:
+                continue
+            theirs = [self.their_surplus(state, deal, m, commitments) for m in pair]
+            if min(theirs) <= 0:
+                continue
+            nash = gain * prod(theirs)
+            if best is None or nash > best[0]:
+                best = (nash, gain, min(theirs), members)
+        if best is None:
             return []
 
-        members = [self.player] + allies[:2]
-        # One id shared by every copy: the members are answering the *same*
-        # proposal, and the runner only forms the pact once all of them have
-        # signed that one id. Giving each copy its own id meant the
-        # signatures never met and no pact could ever form.
-        pact_id = str(uuid.uuid4())
+        nash, gain, theirs, members = best
+        # One id shared by every copy, so the runner can collect all signatures.
         return [
             Message(id=pact_id, sender=self.player, receiver=m,
                     message_type=MessageType.PROPOSE,
                     commitment_type=CommitmentType.ALLIANCE, turns=3,
-                    coalition=members)
+                    coalition=members,
+                    rationale={"gain": gain, "their_gain": theirs, "nash": nash})
             for m in members if m != self.player
         ]
 
@@ -444,24 +399,28 @@ class NegotiationStrategy:
             if not their_units:
                 continue
 
-            ranked: List[Tuple[float, Message]] = []
-            barred = near_win(state, p) or p in self.refuse
+            # Nash bargaining: rank deals both sides gain from by the product of
+            # the surpluses; skip any the partner is predicted to refuse.
+            ranked: List[Tuple[float, float, float, Message]] = []
+            barred = near_win(state, p) or p in self.refuse or p in self.rebuffed
             for offer in ([] if barred else self._candidate_deals(state, p)):
                 deal = message_to_commitment(offer, p, state.turn)
                 if self.overcommits(state, deal):
                     continue
                 v_none, v_kept, _v_broken = self.deal_totals(state, deal, p, commitments)
-                # Ranked by the counterfactual the deck asks for: value if
-                # honoured minus value without the deal.
-                self._record_price(state, deal, v_kept - v_none)
-                ranked.append((v_kept - v_none, offer))
+                gain = v_kept - v_none
+                self._record_price(state, deal, gain)
+                if gain <= MIN_DEAL_VALUE:
+                    continue
+                theirs = self.their_surplus(state, deal, p, commitments)
+                if theirs > 0:
+                    ranked.append((gain * theirs, gain, theirs, offer))
 
             ranked.sort(key=lambda r: r[0], reverse=True)
-            for gain, offer in ranked[:MAX_PROPOSALS_PER_OPPONENT]:
-                if gain > MIN_DEAL_VALUE:
-                    offer.rationale = {"gain": gain, "considered": len(ranked),
-                                       "floor": MIN_DEAL_VALUE}
-                    proposals.append(offer)
+            for nash, gain, theirs, offer in ranked[:MAX_PROPOSALS_PER_OPPONENT]:
+                offer.rationale = {"gain": gain, "their_gain": theirs, "nash": nash,
+                                   "considered": len(ranked), "floor": MIN_DEAL_VALUE}
+                proposals.append(offer)
 
             # A threat is what is left when there is nothing worth trading:
             # they can reach my centres and no deal with them pays.
@@ -484,9 +443,7 @@ class NegotiationStrategy:
                           trust_model: TrustModel) -> Optional[Message]:
         """ACCEPT, COUNTER or REJECT one incoming sentence."""
         if msg.message_type == MessageType.THREAT:
-            # Not a deal, so there is nothing to accept. It is priced instead:
-            # the agent records it and the planner charges more for attacking
-            # a player who has promised to retaliate (see Agent.deterrence).
+            # Not a deal; the Agent records it as deterrence.
             return None
 
         if invalid_proposal_reason(msg) is not None:
@@ -513,53 +470,45 @@ class NegotiationStrategy:
         if ev > v_none:
             return self._accept(msg, why)
 
-        # Not at these terms — but a shorter deal exposes me for fewer turns,
-        # so try the same sentence with a smaller number in it before walking
-        # away. This is what makes negotiation rounds 2 and 3 do any work.
-        counter = self._counter_terms(msg)
-        if counter is not None and msg.message_type != MessageType.COUNTER:
-            c_deal = message_to_commitment(counter, self.player, state.turn)
-            c_none, c_kept, c_broken = self.deal_totals(state, c_deal, msg.sender, commitments)
-            c_ev = p_keep * c_kept + (1 - p_keep) * c_broken
-            if c_ev > c_none:
-                # Not priced into deal_prices: c_deal is built from my own
-                # counter, so both "players" are me and its key is not the
-                # key the accepted deal will have. The planner re-prices it.
-                counter.rationale = {**why, "ev_countered": c_ev,
-                                     "v_none_countered": c_none}
-                return counter
+        # Not at these terms; offer the smaller version with the largest Nash product.
+        best = None
+        if msg.message_type != MessageType.COUNTER:
+            for counter in self._counter_offers(msg):
+                c_deal = message_to_commitment(counter, self.player, state.turn)
+                c_none, c_kept, c_broken = self.deal_totals(state, c_deal, msg.sender, commitments)
+                mine = p_keep * c_kept + (1 - p_keep) * c_broken - c_none
+                if mine <= 0:
+                    continue
+                theirs = self.their_surplus(state, c_deal, msg.sender, commitments)
+                if theirs > 0 and (best is None or mine * theirs > best[0]):
+                    best = (mine * theirs, counter, c_none + mine, c_none, theirs)
+        if best is not None:
+            nash, counter, c_ev, c_none, theirs = best
+            # Not recorded in deal_prices: its key differs from the accepted deal's.
+            counter.rationale = {**why, "ev_countered": c_ev, "v_none_countered": c_none,
+                                 "their_gain": theirs, "nash": nash}
+            return counter
 
         return self._reject(msg, why)
 
-    def _counter_terms(self, msg: Message) -> Optional[Message]:
-        """The same deal, smaller. Halve the term; for a DMZ, give back the
-        territories I most want to keep my hands free on.
-
-        A pact is not counter-offerable: its members are answering one shared
-        proposal, and a bilateral counter would quietly drop the coalition and
-        turn it into a two-way deal nobody agreed to.
-        """
+    def _counter_offers(self, msg: Message) -> List[Message]:
+        """The same deal, smaller: each shorter term, or one DMZ square dropped. Pacts get none."""
         if msg.coalition:
-            return None
-        turns = max(1, (msg.turns or 1) // 2)
-        dmz = msg.dmz_territories
+            return []
+        base, dmz = msg.turns or 1, msg.dmz_territories
+        shapes = [(t, dmz) for t in range(1, base)]
         if msg.commitment_type == CommitmentType.DMZ and dmz and len(dmz) > 1:
-            dmz = sorted(dmz)[:len(dmz) - 1]
-        elif turns == (msg.turns or 1) and msg.commitment_type == CommitmentType.DMZ:
-            return None
-        if turns == (msg.turns or 1) and dmz == msg.dmz_territories:
-            return None
-
-        return Message(
+            shapes += [(base, [d for d in dmz if d != drop]) for drop in dmz]
+        return [Message(
             id=str(uuid.uuid4()), sender=self.player, receiver=msg.sender,
             message_type=MessageType.COUNTER, reference_id=msg.id,
             commitment_type=msg.commitment_type, turns=turns,
             target_territory=msg.target_territory,
-            supported_from=msg.supported_from, dmz_territories=dmz,
+            supported_from=msg.supported_from, dmz_territories=squares,
             private=msg.private, repay_turn=msg.repay_turn,
             # The terms are unchanged, so the duty stays where it was.
             obligated=msg.obligated or msg.sender,
-        )
+        ) for turns, squares in shapes]
 
     # ------------------------------------------------------------------
     # Helpers

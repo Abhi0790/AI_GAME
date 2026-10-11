@@ -1,10 +1,10 @@
 """Adjudicator conformance: DATC cases, adapted, plus property tests.
 
 The DATC is the reference test set for Diplomacy adjudicators. This game has
-no fleets, coasts, convoys or retreats, so the sections covering them do not
-apply; what is left is section 6.A (illegal orders), 6.C (circular movement
-and swaps), 6.D (supports and dislodges) and 6.E (head-to-head battles), which is what this file walks
-through on the twelve-territory board.
+no fleets, coasts or convoys, so the sections covering them do not apply;
+what is left is section 6.A (illegal orders), 6.C (circular movement and
+swaps), 6.D (supports and dislodges), 6.E (head-to-head battles) and the
+retreat and adjustment rules, on the twelve-territory board.
 
 Adjacency used below — the default board, `ring_board(4)`:
     R1: R2 Y2 C2      R2: R1 B1 N1      B1: R2 B2 N1      B2: B1 G1 C1
@@ -173,7 +173,8 @@ class TestSupportsAndDislodges:
             move(R, "R2", "N1"), support_move(R, "B1", "R2", "N1"), hold(B, "N1"),
         ])
         assert positions(new)["N1"] == R
-        assert B not in positions(new).values()
+        # Dislodged, it retreats: not to R2, where the attack came from.
+        assert [t for t, p in positions(new).items() if p == B][0] in ("C1", "C2")
 
     def test_6D_supported_hold_stops_a_supported_attack(self):
         """Attack 2 against defence 2 bounces: strength must exceed defence."""
@@ -202,6 +203,15 @@ class TestSupportsAndDislodges:
             move(R, "R2", "N1"),
             support_move(R, "B1", "R2", "N1"),
             move(B, "N1", "B1"),           # head to head with the supporter
+        ])
+        assert positions(new)["N1"] == R
+
+    def test_6D_own_attack_does_not_cut_own_support(self):
+        """An attack by a country on one of its own units does not cut support."""
+        state = board((R, "R2"), (R, "B1"), (R, "B2"), (B, "N1"))
+        new, _o, _l = resolve(state, [
+            move(R, "R2", "N1"), support_move(R, "B1", "R2", "N1"),
+            move(R, "B2", "B1"), hold(B, "N1"),
         ])
         assert positions(new)["N1"] == R
 
@@ -273,7 +283,9 @@ class TestHeadToHead:
         s = board((R, "R2"), (R, "B1"), (B, "N1"), (G, "R1"))
         out = resolve(s, [move(R, "R2", "N1"), support_move(R, "B1", "R2", "N1"),
                           move(B, "N1", "R2"), move(G, "R1", "R2")])[0]
-        assert positions(out) == {"N1": R, "B1": R, "R2": G}
+        pos = positions(out)
+        assert (pos["N1"], pos["B1"], pos["R2"]) == (R, R, G)
+        assert {t for t, p in pos.items() if p == B} <= {"C1", "C2"}
 
     def test_6E_head_to_head_bounce_still_blocks(self):
         """An equal head-to-head bounces both, and the square stays blocked."""
@@ -612,3 +624,88 @@ class TestDislodgedSupport:
             move(G, "C1", "N1"),
         ])
         assert positions(new).get("N1") == R, "unbroken support should still win N1"
+
+
+# ── retreats and adjustments ────────────────────────────────────────────
+
+def _pick(choice):
+    """A chooser that always picks `choice` (a list) and records what it was offered."""
+    seen = []
+
+    def chooser(player, kind, options, count, state, turn):
+        seen.append((player, kind, sorted(options), count))
+        return choice
+    chooser.seen = seen
+    return chooser
+
+
+class TestRetreats:
+    def test_retreat_options_exclude_attacker_origin_and_standoffs(self):
+        # Red dislodges Blue from N1 out of R2; Green and Gold bounce in C1.
+        s = board((R, "R2"), (R, "B1"), (B, "N1"), (G, "B2"), (Y, "N2"))
+        ch = _pick([])
+        resolve(s, [move(R, "R2", "N1"), support_move(R, "B1", "R2", "N1"), hold(B, "N1"),
+                    move(G, "B2", "C1"), move(Y, "N2", "C1")], chooser=ch)
+        assert ch.seen == [(B, "retreat", ["C2"], 1)]
+
+    def test_chosen_retreat_is_used_and_empty_choice_disbands(self):
+        s = board((R, "R2"), (R, "B1"), (B, "N1"))
+        orders = [move(R, "R2", "N1"), support_move(R, "B1", "R2", "N1"), hold(B, "N1")]
+        assert positions(resolve(s, orders, chooser=_pick(["C2"]))[0])["C2"] == B
+        assert B not in positions(resolve(s, orders, chooser=_pick([]))[0]).values()
+
+    def test_no_legal_retreat_disbands(self):
+        s = board((R, "R2"), (R, "B1"), (B, "N1"), (G, "C1"), (G, "C2"))
+        new, _o, log = resolve(s, [move(R, "R2", "N1"), support_move(R, "B1", "R2", "N1"),
+                                   hold(B, "N1")])
+        assert B not in positions(new).values()
+        assert "Disbanded: N1 (no retreat)" in log.events
+
+    def test_two_retreats_to_one_square_both_disband(self):
+        # Blue out of N1 and Gold out of N2; C1 is held, so both can only reach C2.
+        s = board((R, "R2"), (R, "B1"), (R, "C1"), (B, "N1"),
+                  (G, "G2"), (G, "Y1"), (Y, "N2"))
+        new, _o, log = resolve(s, [
+            move(R, "R2", "N1"), support_move(R, "B1", "R2", "N1"), hold(R, "C1"),
+            move(G, "G2", "N2"), support_move(G, "Y1", "G2", "N2"),
+            hold(B, "N1"), hold(Y, "N2"),
+        ], chooser=_pick(["C2"]))
+        assert B not in positions(new).values() and Y not in positions(new).values()
+        assert any("collide" in e for e in log.events)
+
+
+class TestAdjustments:
+    def _autumn(self, *units, owners):
+        s = board(*units, turn=2)
+        s.supply_centers.update(owners)
+        return s
+
+    def test_player_chooses_build_site_and_may_waive(self):
+        # C1 is not a centre: Red owns R1 and R2 with one unit, so one build.
+        s = self._autumn((R, "C1"), owners={"R1": R, "R2": R})
+        new, _o, _l = resolve(s, [], chooser=_pick(["R2"]))
+        assert positions(new) == {"C1": R, "R2": R}
+        new, _o, log = resolve(s, [], chooser=_pick([]))
+        assert positions(new) == {"C1": R}
+        assert any("waives" in e for e in log.events)
+
+    def test_player_chooses_which_unit_disbands(self):
+        s = self._autumn((R, "R1"), (R, "C1"), owners={"R1": R})
+        new, _o, _l = resolve(s, [], chooser=_pick(["R1"]))
+        assert positions(new) == {"C1": R}
+
+    def test_a_short_disband_choice_is_made_up(self):
+        s = self._autumn((R, "R1"), (R, "C1"), owners={"R1": R})
+        new, _o, _l = resolve(s, [], chooser=_pick([]))
+        assert len(positions(new)) == 1
+
+
+def test_agent_choices_are_legal_and_sized():
+    from src.agents.agent import Agent
+    a = Agent(R, "Opportunist")
+    s = board((R, "C1"), (B, "N1"), turn=2)
+    assert a.choose("retreat", ["B2", "G1"], 1, s) in (["B2"], ["G1"])
+    assert a.choose("retreat", [], 1, s) == []
+    assert len(a.choose("build", ["R1", "R2"], 1, s)) == 1
+    assert sorted(a.choose("build", ["R1", "R2"], 5, s)) == ["R1", "R2"]
+    assert a.choose("disband", ["C1"], 1, s) == ["C1"]

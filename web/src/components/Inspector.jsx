@@ -40,10 +40,12 @@ export default function Inspector({ gameId, seat, turn, onClose }) {
           <>
             <Position data={data} />
             <Beliefs data={data} />
+            <SeenBy data={data} />
             <Deals data={data} open={openDeal} setOpen={setOpenDeal} />
             <Search data={data} />
             <Candidates data={data} />
             <Forfeits data={data} />
+            <LastSolve data={data} />
           </>
         )}
       </div>
@@ -135,6 +137,41 @@ function Beliefs({ data }) {
         </tbody>
       </table>
       </div>
+    </div>
+  );
+}
+
+/* ── 2b. what others have seen of this seat ───────────────────────── */
+
+function SeenBy({ data }) {
+  const rows = Object.entries(data.seen_by ?? {});
+  if (!rows.length) return null;
+  const candour = data.candour ?? {};
+  return (
+    <div className="step">
+      <h5>2b · How others see me — and how candid they have been</h5>
+      <div className="formula">
+        standing = my promise record as they saw it · offers stop when
+        infamy ≥ 1 <b>and</b> standing &lt; 0.5
+      </div>
+      <table>
+        <thead>
+          <tr><th>player</th><th>my standing</th><th>infamy</th><th>offers</th><th>their candour</th></tr>
+        </thead>
+        <tbody>
+          {rows.map(([p, r]) => (
+            <tr key={p}>
+              <td><span className="dot" style={{ background: COLOR[p] }} /> {p}</td>
+              <td className="num">{fmt(r.standing)}</td>
+              <td className="num">{fmt(r.infamy)}</td>
+              <td style={{ color: r.expects_refusal ? "var(--bad)" : "var(--muted)" }}>
+                {r.expects_refusal ? "expects refusal" : "open"}
+              </td>
+              <td className="num">{p in candour ? fmt(candour[p]) : "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -326,6 +363,31 @@ function Forfeits({ data }) {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+/* ── 7. the last regret-matching solve ────────────────────────────── */
+
+function LastSolve({ data }) {
+  const d = data.last_decision;
+  if (!d) return null;
+  return (
+    <div className="step">
+      <h5>7 · Last turn's mixed strategy (regret matching)</h5>
+      <dl className="kv">
+        <dt>turn</dt><dd>{d.turn}</dd>
+        <dt>exploitability</dt><dd>{fmt(d.exploitability, 3)}</dd>
+      </dl>
+      {d.mixed.map((m, i) => (
+        <div className="meter" key={i} style={{ marginTop: 4 }}>
+          <span className="mono" style={{ color: m.played ? "var(--accent)" : "var(--muted)" }}>
+            {m.orders.map(orderText).join(", ")}{m.played ? " (played)" : ""}
+          </span>
+          <div className="track"><i style={{ width: `${Math.max(2, m.p * 100)}%` }} /></div>
+          <span className="mono" style={{ color: "var(--muted)" }}>{pct(m.p)}</span>
+        </div>
+      ))}
     </div>
   );
 }

@@ -14,7 +14,7 @@ CONFIG = {
     "seed": 7,
     "seating": {"Red": "Honest", "Blue": "Opportunist",
                 "Green": "Vengeful", "Gold": "Paranoid"},
-    "search": "expectiminimax",
+    "search": "expectimax",
     "node_budget": 200,          # keeps the whole file well under a minute
     "negotiation_rounds": 2,
     "knobs": {"LAMBDA_INCENTIVE": 0.6},
@@ -225,7 +225,8 @@ def test_inspecting_a_game_does_not_change_how_it_plays():
     the stream the real game draws from."""
     def play_through(inspect):
         gid = client.post("/api/game/new", json={
-            "seed": 5, "node_budget": 300, "max_turns": 6}).json()["game_id"]
+            "seed": 5, "node_budget": 300, "max_turns": 6,
+            "erase_reputation": True}).json()["game_id"]
         client.post(f"/api/game/{gid}/step")
         if inspect:
             for seat in ("Red", "Blue", "Green"):
@@ -264,7 +265,7 @@ def test_two_games_on_different_boards_do_not_contaminate_each_other():
 
 def test_interleaved_games_replay_their_own_seed():
     """Games share one process; stepping one must not change another."""
-    cfg = {**CONFIG, "max_turns": 3}
+    cfg = {**CONFIG, "max_turns": 3, "erase_reputation": True}
 
     def orders(gid):
         return [sorted(map(str, h.get("orders") or []))
@@ -280,3 +281,19 @@ def test_interleaved_games_replay_their_own_seed():
         client.get(f"/api/game/{b}/inspect/Red")
         client.post(f"/api/game/{b}/step")
     assert orders(a) == orders(alone) == orders(b)
+
+
+def test_inspector_shows_second_order_beliefs_candour_and_the_last_solve():
+    gid = client.post("/api/game/new", json={
+        **CONFIG, "search": "regret", "max_turns": 4, "erase_reputation": True,
+    }).json()["game_id"]
+    for _ in range(2):
+        client.post(f"/api/game/{gid}/step")
+    d = client.get(f"/api/game/{gid}/inspect/Red").json()
+    assert set(d["seen_by"]) == {"Blue", "Green", "Gold"}
+    assert all(0 <= r["standing"] <= 1 for r in d["seen_by"].values())
+    assert isinstance(d["candour"], dict)
+    last = d["last_decision"]
+    assert last is not None and last["exploitability"] >= 0
+    assert abs(sum(m["p"] for m in last["mixed"]) - 1) < 0.01
+    assert sum(m["played"] for m in last["mixed"]) == 1

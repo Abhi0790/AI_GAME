@@ -74,7 +74,7 @@ class TestAcceptanceIsExpectedValue:
         # A big upside that is not big enough to cover being walked over, even
         # by a stranger trusted at 0.9: 0.9*2.6 + 0.1*-10 = 1.34 < 2.0.
         _stub_values(ns, v_none=2.0, v_kept=2.6, v_broken=-10.0)
-        ns._counter_terms = lambda msg: None
+        ns._counter_offers = lambda msg: []
         assert ns.evaluate_proposal(_make_state(), _propose(), trust).message_type \
             == MessageType.REJECT
 
@@ -92,24 +92,36 @@ class TestAcceptanceIsExpectedValue:
         shifty = TrustModel(Player.RED)
         shifty.get_record(Player.BLUE, CommitmentType.ALLIANCE).beta = 9.0
         ns = _strategy(); _stub_values(ns, **values)
-        ns._counter_terms = lambda m: None
+        ns._counter_offers = lambda m: []
         assert ns.evaluate_proposal(state, msg, shifty).message_type == MessageType.REJECT
 
 
 class TestCounterOffers:
-    def test_counters_with_shorter_terms_before_walking_away(self):
+    def test_counters_with_the_smaller_deal_of_largest_nash_product(self):
         ns = _strategy()
         trust = TrustModel(Player.RED)
-        # The 3-turn deal fails; the halved one passes.
+        # The 3-turn deal fails; both shorter ones pass for me, and the
+        # partner prefers two turns to one.
         def values(state, deal, partner, commitments):
             return (1.0, 3.0, 2.0) if deal.valid_until_turn <= 2 else (1.0, 1.0, 0.0)
         ns.deal_values = values
         ns.deal_totals = values
+        ns.their_surplus = lambda state, deal, *a: 2.0 if deal.valid_until_turn == 2 else 0.5
 
         reply = ns.evaluate_proposal(_make_state(), _propose(turns=3), trust)
         assert reply.message_type == MessageType.COUNTER
-        assert reply.turns == 1
+        assert reply.turns == 2
         assert reply.reference_id == "m"
+        assert reply.rationale["nash"] > 0
+
+    def test_no_counter_the_partner_would_refuse(self):
+        ns = _strategy()
+        trust = TrustModel(Player.RED)
+        ns.deal_totals = lambda state, deal, *a: (
+            (1.0, 3.0, 2.0) if deal.valid_until_turn <= 2 else (1.0, 1.0, 0.0))
+        ns.their_surplus = lambda *a: -0.1
+        reply = ns.evaluate_proposal(_make_state(), _propose(turns=3), trust)
+        assert reply.message_type == MessageType.REJECT
 
     def test_a_counter_is_never_countered_again(self):
         """Otherwise rounds 2 and 3 are an infinite haggle."""
@@ -286,3 +298,23 @@ def test_a_bound_player_does_not_sign_away_its_growth():
     assert honest.overcommits(state, dmz) and honest.overcommits(state, ally(Player.BLUE))
     assert not honest.overcommits(state, ally(Player.GREEN)), "renewing the one alliance is fine"
     assert not opp.overcommits(state, dmz) and not opp.overcommits(state, ally(Player.BLUE))
+
+
+def test_pact_picks_the_pair_with_the_largest_nash_product():
+    from src.engine.board import ring_board, use_board
+    R, B, G, Y, P = Player.RED, Player.BLUE, Player.GREEN, Player.GOLD, Player.PURPLE
+    with use_board(ring_board(5)):
+        homes = {p: [f"{c}1", f"{c}2"] for p, c in zip((R, B, G, Y, P), "RBGYP")}
+        centres = {t: p for p, ts in homes.items() for t in ts}
+        centres.update({f"N{i}": Y for i in range(1, 6)})
+        state = GameState(turn=3, units=[Unit(player=p, territory=t)
+                                         for p, ts in homes.items() for t in ts],
+                          supply_centers=centres, territory_owners={})
+        ns = _strategy()
+        ns.deal_totals = lambda *a: (0.0, 1.0, 0.0)
+        # Blue would refuse; Purple gains most.
+        ns.their_surplus = lambda s, deal, m, c: {B: -1.0, G: 0.5, P: 2.0}[m]
+        offers = ns._pact_offers(state, TrustModel(R))
+    assert {m.receiver for m in offers} == {G, P}
+    assert set(offers[0].coalition) == {R, G, P}
+    assert offers[0].rationale["nash"] == 1.0 * 0.5 * 2.0

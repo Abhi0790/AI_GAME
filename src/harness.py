@@ -76,6 +76,7 @@ def build_agents(cfg: GameConfig) -> List:
             agents.append(ChaosAgent(player, mode=cfg.chaos_mode, seed=cfg.seed))
         else:
             kw = {"search": cfg.search, "node_budget": cfg.node_budget, "depth": cfg.depth,
+                  "reputation_carries": cfg.reputation_carries,
                   **cfg.seat_planner.get(player, {})}
             a = Agent(player, persona, PlannerConfig(**kw))
             if player in cfg.seat_keep_forecast:
@@ -89,9 +90,7 @@ def build_agents(cfg: GameConfig) -> List:
     return agents
 
 
-# The board and the knobs are process-global while a game runs, so two games
-# with different setups must not be inside game_setup at once. Re-entrant: a
-# script that wraps play() in its own game_setup is nesting the same config.
+# Board and knobs are process-global during a game: one game_setup at a time (re-entrant).
 _SETUP_LOCK = threading.RLock()
 
 
@@ -104,12 +103,7 @@ def game_setup(cfg: GameConfig) -> Iterator[None]:
 
 @contextmanager
 def read_only() -> Iterator[None]:
-    """Do hypothetical work without moving the stream the real game draws from.
-
-    The planner samples opponent worlds while it searches, so anything that
-    re-derives a decision — the dashboard's detailed mode, say — would
-    otherwise change what happens next.
-    """
+    """Do hypothetical work without moving the game's random stream."""
     state = random.getstate()
     try:
         yield
@@ -206,9 +200,11 @@ def play_series(cfgs: Iterable[GameConfig],
                 reduce: Optional[Callable[[GameConfig, GameRunner], Any]] = None) -> List[Any]:
     """Games one after another, each starting from the reputation the last
     ended with, unless its config sets erase_reputation. Serial by nature."""
+    cfgs = list(cfgs)
     out, reputation = [], None
-    for cfg in cfgs:
-        cfg = dataclasses.replace(cfg, reputation=reputation)
+    for i, cfg in enumerate(cfgs):
+        carries = i + 1 < len(cfgs) and not cfgs[i + 1].erase_reputation
+        cfg = dataclasses.replace(cfg, reputation=reputation, reputation_carries=carries)
         runner = play(cfg)
         reputation = reputation_of(runner)
         out.append(reduce(cfg, runner) if reduce else runner)

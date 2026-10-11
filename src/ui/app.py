@@ -11,6 +11,7 @@ Endpoints:
     GET  /api/game/{id}/legal     Legal orders for the human's units
 """
 
+import copy
 import json
 import os
 import threading
@@ -31,7 +32,7 @@ from src.agents.negotiation.personas import PERSONAS
 from src.common.config import GameConfig
 from src.harness import build_runner, game_setup, knob_values, read_only, reputation_of
 from src.engine.replay import save_replay
-from src.engine.orders import generate_orders_for_unit
+from src.engine.orders import generate_orders_for_unit, order_label
 from src.engine.board import (
     Board, active, players, SEAT_CODES,
     DEFAULT_SEATS, DEFAULT_HOMES_PER_PLAYER, DEFAULT_MAX_TURNS, DEFAULT_WIN_FRACTION, MIN_SEATS, MAX_SEATS,
@@ -43,10 +44,7 @@ from src.evaluation.metrics import (
 
 app = FastAPI(title="Territory Game Dashboard")
 
-# The dashboard is a React app built by Vite into web/dist. In the container
-# those files sit next to this module; in a source checkout they are two
-# levels up. Either way FastAPI serves them, so the page and the API share an
-# origin and no CORS or proxy configuration is needed in production.
+# The Vite build: next to this module in the container, two levels up in a checkout.
 _HERE = os.path.dirname(__file__)
 _DIST_CANDIDATES = [
     os.path.join(_HERE, "dist"),
@@ -65,7 +63,8 @@ def _serialise_state(state):
     return {
         "turn": state.turn,
         "units": [
-            {"player": u.player.value, "territory": u.territory}
+            {"player": u.player.value, "territory": u.territory,
+             "unit_type": u.unit_type.value, "coast": u.coast}
             for u in state.units
         ],
         "supply_centers": {
@@ -135,9 +134,7 @@ def _serialise_commitment(c, turn=None):
 
 def _serialise_history_step(step, viewer=None):
     hidden = _hidden_from(viewer)
-    # Engine logs are free-form text, so they cannot be filtered by deal id.
-    # Seated players get the tactical log; public negotiations are represented
-    # by the filtered messages, commitments and outcomes below.
+    # Free-form logs cannot be filtered by deal, so seated players get the tactical log only.
     log = step.log.events if viewer is None else [
         line for line in step.log.events
         if not line.startswith(("Commitment created:", "Deal dropped:",
@@ -153,6 +150,7 @@ def _serialise_history_step(step, viewer=None):
                 "order_type": o.order_type.value,
                 "target": o.target,
                 "supported_from": o.supported_from,
+                "coast": o.coast,
             }
             for o in step.orders
         ],
@@ -199,7 +197,10 @@ def _serialise_history_step(step, viewer=None):
                 "candidates": getattr(t, "candidates", 0),
                 "pruned": getattr(t, "pruned", 0),
                 "vengeance": round(getattr(t, "vengeance", 0.0), 3),
-                "search": getattr(t, "search", "expectiminimax"),
+                "search": getattr(t, "search", "expectimax"),
+                # Regret search only: P of each candidate, and the solve's gap.
+                "mixed": [round(pr, 3) for _c, pr in getattr(t, "mixed", [])],
+                "exploitability": getattr(t, "exploitability", None),
                 "penalty_rows": [
                     {"partner": r[0].value, "vcoop": round(r[1], 3),
                      "delta_p": round(r[2], 3), "horizon": round(r[3], 3),
@@ -254,9 +255,7 @@ def _game_summary(g) -> dict:
         # Publish them after a seated game finishes.
         "brier": None if private_view else brier_score(runner.calibration),
         "reliability": [] if private_view else reliability_bins(runner.calibration, bins=5),
-        # The negotiator and the planner price the same deal minutes apart in
-        # the same turn, against different models of the partner. This is how
-        # often they disagreed.
+        # How often the negotiator and the planner disagreed about the same deal.
         "reversals": {} if private_view else preference_reversals(
             runner.reversals,
             {p: getattr(a, "persona_name", "?") for p, a in runner.agents.items()}),
@@ -290,6 +289,7 @@ def _board_data(board) -> dict:
         "max_turns": board.max_turns,
         "win_centers": board.win_centers,
         "home_builds": board.home_builds,
+        "fleet_adjacency": board.fleet_adjacency,
     }
 
 
@@ -304,6 +304,7 @@ class NewGame(BaseModel):
     """GameConfig over the wire. Seats are colour strings ("Red"), knobs are
     bare UPPERCASE constant names."""
     seed: Optional[int] = None            # None -> random
+    map: str = "ring"                     # "ring" | "standard"
     n_seats: int = DEFAULT_SEATS
     homes_per_player: int = DEFAULT_HOMES_PER_PLAYER
     win_centers: Optional[int] = None     # None -> win_fraction of the centres
@@ -313,9 +314,11 @@ class NewGame(BaseModel):
     outer_rings: int = 0                  # rings of neutral centres outside the homes
     fortified_homes: bool = False         # home centres defend at +1
     sieges: bool = False                  # centres fall only to a unit there since spring
+    draws: bool = False                   # survivors may agree a draw
     erase_reputation: bool = False        # False: start from the last game's reputation
+    reputation_carries: bool = True       # the next dashboard game inherits this one's
     seating: Optional[Dict[str, str]] = None   # {"Red": "Honest", ...}
-    search: str = "expectiminimax"
+    search: str = "expectimax"
     node_budget: int = 1500
     negotiation_rounds: int = 3
     rep_cost_scale: float = 1.0
@@ -458,11 +461,7 @@ async def get_state(game_id: str):
 
 @app.get("/api/game/{game_id}/pending")
 def pending(game_id: str):
-    """Proposals waiting on the human seat, plus its legal orders.
-
-    Calling this runs the turn's opening proposals but nothing else, so the
-    examiner sees what they have been offered before committing to orders.
-    """
+    """Proposals waiting on the human seat, plus its legal orders."""
     g = _get(game_id)
     if g is None:
         return JSONResponse(status_code=404, content={"error": "Game not found"})
@@ -488,26 +487,17 @@ def _legal_orders(runner, seat: Player) -> Dict[str, List[dict]]:
             continue
         out[u.territory] = [
             {"order_type": o.order_type.value, "target": o.target,
-             "supported_from": o.supported_from,
-             "label": _order_label(o)}
+             "supported_from": o.supported_from, "coast": o.coast,
+             "label": order_label(o)}
             for o in generate_orders_for_unit(runner.state, u)
         ]
     return out
 
 
-def _order_label(o: Order) -> str:
-    if o.order_type == OrderType.HOLD:
-        return f"{o.unit_territory} holds"
-    if o.order_type == OrderType.MOVE:
-        return f"{o.unit_territory} → {o.target}"
-    if o.supported_from:
-        return f"{o.unit_territory} supports {o.supported_from} → {o.target}"
-    return f"{o.unit_territory} supports {o.target} holding"
-
-
 class HumanTurn(BaseModel):
     orders: List[dict] = []
     decisions: Dict[str, bool] = {}   # message id -> accept?
+    draw: bool = False                # vote for a draw after this turn (draws on)
 
 
 @app.post("/api/game/{game_id}/step")
@@ -520,9 +510,7 @@ def step_game(game_id: str, turn: HumanTurn = HumanTurn()):
         return {"finished": True, "message": "Game already finished",
                 **_game_summary(g)}
 
-    # ponytail: one lock per game, non-blocking — a second step while one is
-    # running is a double-click, not a queue. game_setup is still
-    # process-global; make it thread-local if concurrent games ever bite.
+    # ponytail: one non-blocking lock per game; game_setup serialises games process-wide.
     if not g["lock"].acquire(blocking=False):
         return JSONResponse(status_code=409,
                             content={"error": "a step is already running"})
@@ -541,16 +529,15 @@ def _step(g, turn: "HumanTurn"):
             agent.pending_orders = [
                 Order(player=seat, unit_territory=o["unit_territory"],
                       order_type=OrderType(o["order_type"]),
-                      target=o.get("target"), supported_from=o.get("supported_from"))
+                      target=o.get("target"), supported_from=o.get("supported_from"),
+                      coast=o.get("coast"))
                 for o in turn.orders
             ]
         except (KeyError, ValueError, TypeError) as e:
             return JSONResponse(status_code=400, content={
                 "error": f"malformed order: {e}",
                 "order_types": [t.value for t in OrderType]})
-        # Decisions arrive keyed by message id, which is what the browser has
-        # to hand; the agent keys them by the deal so a counter-offer inherits
-        # the answer already given to the original.
+        # Re-key decisions from message id to the deal, so counters inherit them.
         offered = {m.id: m for m in runner.begin_turn()}
         agent.decisions = {
             agent.decision_key(m): accept
@@ -558,6 +545,7 @@ def _step(g, turn: "HumanTurn"):
             if (m := offered.get(mid)) is not None
         }
         agent.inbox = []
+        agent.draw_vote = turn.draw
 
     played_turn = runner.state.turn
     step_data = runner.step()
@@ -566,6 +554,10 @@ def _step(g, turn: "HumanTurn"):
     if champion:
         g["finished"] = True
         g["winner"] = champion.value
+    elif runner.drawn:
+        g["finished"] = True
+        g["winner"] = None
+        g["leaders"] = [p.value for p in runner.drawn]
     elif runner.state.turn > runner.max_turns:
         g["finished"] = True
         ahead = runner.leaders()
@@ -597,16 +589,8 @@ async def get_replay(game_id: str):
 
 @app.get("/api/game/{game_id}/inspect/{player}")
 def inspect(game_id: str, player: str, turn: Optional[int] = None):
-    """Everything behind one seat's current decision, step by step.
-
-    This is the dashboard's detailed mode: not a summary of what the agent
-    did, but the intermediate quantities it did it from — every live deal
-    priced three ways, the trust network's two inputs and its output, and the
-    candidate order sets that survived pruning with their scores. Re-derived
-    on demand from the live state rather than logged every turn, because
-    logging all of it for four seats over twelve turns is most of a megabyte
-    per game and nobody reads 95% of it.
-    """
+    """Everything behind one seat's current decision, re-derived on demand
+    (the dashboard's detailed mode)."""
     g = _get(game_id)
     if g is None:
         return JSONResponse(status_code=404, content={"error": "Game not found"})
@@ -625,9 +609,27 @@ def inspect(game_id: str, player: str, turn: Optional[int] = None):
         return _inspect(g, seat, turn)
 
 
+def _last_decision(runner, seat: Player) -> Optional[dict]:
+    """The seat's previous regret solve: its mixed strategy and exploitability gap."""
+    trace = runner.history[-1].traces.get(seat) if runner.history else None
+    if not getattr(trace, "mixed", None):
+        return None
+    return {
+        "turn": runner.history[-1].state.turn,
+        "exploitability": round(trace.exploitability, 4),
+        "mixed": [{"orders": [{"unit": o.unit_territory, "type": o.order_type.value,
+                               "target": o.target, "supported_from": o.supported_from}
+                              for o in cand],
+                   "p": round(p, 3), "played": cand == trace.candidate_orders}
+                  for cand, p in sorted(trace.mixed, key=lambda cp: -cp[1])],
+    }
+
+
 def _inspect(g, seat: Player, turn: Optional[int]):
     runner = g["runner"]
-    agent = runner.agents[seat]
+    # A copy: inspection fills the agent's memos and counters, and the real
+    # decision would otherwise reuse what the inspector sampled.
+    agent = copy.deepcopy(runner.agents[seat])
     state = runner.state
     if not hasattr(agent, "negotiation"):
         return {"seat": seat.value, "kind": "not an AI seat", "deals": [],
@@ -754,6 +756,15 @@ def _inspect(g, seat: Player, turn: Optional[int]):
         "stance": {p.value: round(v, 4) for p, v in agent.stance().items()},
         "grudges": {p.value: round(v, 3) for p, v in agent.grudges.items()},
         "deterrence": {p.value: round(v, 3) for p, v in agent.deterrence.items()},
+        # What each other seat has seen of this one, and whether it expects a no.
+        "seen_by": {p.value: {"standing": round(agent.standing_with(p), 3),
+                              "infamy": round(agent.infamy_with.get(p, 0.0), 3),
+                              "expects_refusal": agent.expects_refusal(p)}
+                    for p in runner.agents if p != seat},
+        # How often each other seat's announced moves matched its orders.
+        "candour": {p.value: round(agent.candour_of(p), 3)
+                    for p in runner.agents if p != seat and p in agent.candour},
+        "last_decision": _last_decision(runner, seat),
         "search": {
             "algorithm": planner.config.search,
             "depth": planner.config.depth,
@@ -779,7 +790,8 @@ async def save(game_id: str):
         return JSONResponse(status_code=409, content={
             "error": "full replay is available after a human game finishes"})
     runner = g["runner"]
-    path = save_replay(runner.history, runner.state, board=g["board"].to_dict())
+    path = save_replay(runner.history, runner.state, board=g["board"].to_dict(),
+                       result=runner.result())
     return {"path": path}
 
 

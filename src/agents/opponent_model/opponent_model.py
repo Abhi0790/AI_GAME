@@ -1,23 +1,46 @@
-"""
-Opponent Model — tracks each opponent's historical behaviour to predict future moves.
+"""Opponent model: move statistics as a prior, reweighted by trust, stated
+intentions and, at the root of a decision, level-1 value."""
+import math
 
-Key capabilities:
-  • Maintains per-opponent move statistics (aggression ratio, target preferences).
-  • Estimates the most likely persona type based on observed trust-keeping rate.
-  • Provides a weighted sampling function that the planner uses instead of
-    uniform-random opponent order sampling.
-"""
-
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 from collections import defaultdict
 import random
 
 from src.common.schemas import (
-    Player, GameState, Order, OrderType, Commitment, CommitmentType
+    Player, GameState, Order, OrderType, Commitment
 )
-from src.engine.board import get_adjacent, get_all_territories, players
+from src.engine.board import players, active
 from src.engine.orders import generate_all_order_sets
-from src.engine.adjudicator import verify_commitments
+from src.engine.adjudicator import verify_commitments, resolve
+
+# Rationality of the level-1 model, per centre of gain: a set worth one centre
+# more than another is e^LEVEL1_BETA times as likely. 0 turns it off.
+LEVEL1_BETA = 3.0
+
+# (board and rules, valuation knobs, turn, position, opponent) -> value of each
+# of their order sets. Pure in those, so shared by every agent and decision.
+_GAIN_CACHE: dict = {}
+
+
+def level1_values(state: GameState, opp: Player, sets: List[List[Order]]) -> List[float]:
+    """Each order set's value to `opp` with everyone else holding.
+
+    ponytail: one reference world (all hold). Average over sampled level-0
+    worlds if opponents look too greedy.
+    """
+    from src.agents.planner import planner as P
+    knobs = (P.CENTRE_VALUE, P.UNIT_VALUE, P.THREATENS_VALUE, P.UNDER_THREAT_VALUE,
+             P.MOBILITY_VALUE, P.GAME_END_VALUE, P.SIEGE_CREDIT)
+    key = (repr(active()), knobs, state.turn,
+           tuple(sorted((u.territory, u.player.value) for u in state.units)),
+           tuple(sorted((t, o.value) for t, o in state.supply_centers.items() if o)), opp)
+    hit = _GAIN_CACHE.get(key)
+    if hit is None:
+        hit = [P.evaluate_state(resolve(state, s)[0], opp) for s in sets]
+        if len(_GAIN_CACHE) > 256:
+            _GAIN_CACHE.clear()
+        _GAIN_CACHE[key] = hit
+    return hit
 
 
 class OpponentProfile:
@@ -59,19 +82,6 @@ class OpponentProfile:
             return 0.5
         return self.commitments_kept / self.commitments_seen
 
-    def estimated_persona(self) -> str:
-        """Rough persona estimate from observed behaviour."""
-        tkr = self.trust_keeping_rate
-        agg = self.aggression_ratio
-
-        if tkr > 0.8:
-            return "Honest"
-        if agg > 0.7:
-            return "Opportunist"
-        if tkr < 0.4:
-            return "Vengeful"
-        return "Paranoid"
-
     # ------------------------------------------------------------------
     # Update
     # ------------------------------------------------------------------
@@ -106,6 +116,10 @@ class OpponentModel:
         # (board, opponent, their deals) -> which of their order sets break a
         # promise. Recomputed once per position rather than per playout.
         self._break_mask: Dict[tuple, List[bool]] = {}
+        # Set by the Agent each turn: moves each player announced, and
+        # P(their words match their orders).
+        self.intents: Dict[Player, List[tuple]] = {}
+        self.candour: Dict[Player, float] = {}
 
     # ------------------------------------------------------------------
     # Observation API
@@ -130,13 +144,9 @@ class OpponentModel:
     # Sampling
     # ------------------------------------------------------------------
     def retaliation_rate(self, player: Player) -> float:
-        """How likely this player is to actually hit back, in [0, 1].
+        """How likely this player is to hit back, in [0, 1].
 
-        Used to price a THREAT: a player who moves is frightening, a player
-        who only talks is not.
-
-        ponytail: aggression is a proxy for follow-through. Track
-        threat-then-attack pairs directly if the deterrence figure needs it.
+        ponytail: aggression proxies follow-through; track threat-then-attack pairs if needed.
         """
         profile = self.profiles.get(player)
         if profile is None or profile.total_orders == 0:
@@ -163,22 +173,11 @@ class OpponentModel:
     def sample_opponent_orders(
         self, state: GameState, samples: int = 3,
         commitments: Optional[List[Commitment]] = None, trust_model=None,
-        incentives: Optional[Dict[Player, float]] = None,
+        incentives: Optional[Dict[Player, float]] = None, rational: bool = False,
     ) -> List[List[Order]]:
-        """Return *samples* joint-opponent order sets, weighted by profiles.
-
-        Weights are built once per opponent and then drawn from `samples`
-        times; scoring all 81 order sets inside the sample loop made 32
-        sampled worlds cost 32x more than it needed to.
-
-        With *commitments* and a *trust_model*, the draw is also conditioned on
-        what the opponent has promised: order sets that honour their live deals
-        are weighted by P(they keep), the rest by 1 - P(they keep). Without
-        this the planner predicted exactly the same behaviour from a partner
-        whether or not a deal existed, so a promise could only ever appear as a
-        penalty on my own orders and never as a reason to expect theirs to
-        change. Reciprocity becomes a belief instead of a fine.
-        """
+        """*samples* joint opponent order sets, weighted by profile (and level-1
+        value if *rational*); honouring their deals gets P(keeps) of the mass,
+        doing what they announced gets P(candour)."""
         opponents = [p for p in players() if p != self.my_player]
         draws: Dict[Player, List[List[Order]]] = {}
         for opp in opponents:
@@ -186,17 +185,16 @@ class OpponentModel:
             if not sets:
                 continue
             weights = self._weights(sets, self.profiles[opp])
+            if rational and LEVEL1_BETA:
+                values = level1_values(state, opp, sets)
+                top = max(values)
+                weights = [w * math.exp(LEVEL1_BETA * (v - top))
+                           for w, v in zip(weights, values)]
 
             deals = [c for c in (commitments or []) if opp in c.players]
             if deals and trust_model is not None:
-                # One P(keeps) for the player, averaged over their live deals:
-                # the draw is over whole order sets, and a set that breaks
-                # anything is already off the honouring branch.
-                #
-                # ponytail: one averaged probability and a binary
-                # honours/breaks split. Weight each set by the product over the
-                # specific deals it breaks if partial defection (keep the DMZ,
-                # drop the support) turns out to matter.
+                # ponytail: one P(keeps) averaged over their deals and a binary
+                # honours/breaks split; weight per broken deal if partial defection matters.
                 iota = (incentives or {}).get(opp, 0.0)
                 p_keep = sum(trust_model.p_keeps(opp, c.commitment_type, iota,
                                                  toward=self.my_player)
@@ -209,6 +207,19 @@ class OpponentModel:
                 if w_break and w_keep:
                     weights = [w * ((1.0 - p_keep) / w_break if b else p_keep / w_keep)
                                for w, b in zip(weights, breaks)]
+
+            said = self.intents.get(opp)
+            if said:
+                # Sets doing everything announced get P(candour) between them.
+                c = self.candour.get(opp, 0.5)
+                match = [all(any(o.unit_territory == f and o.order_type == OrderType.MOVE
+                                 and o.target == t for o in s) for f, t in said)
+                         for s in sets]
+                w_yes = sum(w for w, m in zip(weights, match) if m)
+                w_no = sum(weights) - w_yes
+                if w_yes and w_no:
+                    weights = [w * (c / w_yes if m else (1.0 - c) / w_no)
+                               for w, m in zip(weights, match)]
 
             draws[opp] = random.choices(sets, weights=weights, k=samples)
 
@@ -242,11 +253,3 @@ class OpponentModel:
             weights.append(max(score, 0.01))
 
         return weights
-
-    def _weighted_choice(
-        self, order_sets: List[List[Order]], profile: OpponentProfile
-    ) -> List[Order]:
-        """Single draw. Kept for callers that want one order set."""
-        if not order_sets:
-            return []
-        return random.choices(order_sets, weights=self._weights(order_sets, profile), k=1)[0]

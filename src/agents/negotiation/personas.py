@@ -1,14 +1,8 @@
 """Personas are parameter settings of the same code, not different code.
 
-Four knobs, each one wired to something the planner or the trust model
-already does:
+The knobs:
 
-  reputation_cost  multiplies the Vcoop x deltaP x horizon penalty. It used
-                   to be the only knob that separated anything, because it
-                   was the only term standing between a break and a free
-                   centre; now that breaking also forfeits the unused share
-                   of what the deal was signed for (planner.FORFEIT_WEIGHT),
-                   a multiplier of 5 buys what 100 used to
+  reputation_cost  multiplies the Vcoop x deltaP x horizon penalty
   prior_alpha/beta the Beta prior every new opponent starts from
   vengeance        how much board value the planner will *pay* to hurt a
                    player who betrayed it (0 = never, 1 = a centre of damage
@@ -47,11 +41,7 @@ class PersonaConfig:
 
 
 PERSONAS = {
-    # Pays five times the going rate for its standing. 100.0 was a stand-in
-    # for "infinite" and it had to be: with the forfeiture term absent,
-    # breaking cost ~1/20th of what signing had been credited with, so
-    # nothing short of infinity kept anybody loyal. Measured over 24 rotated
-    # games it now betrays 17.6% against 21.8-23.3% for the rest.
+    # Pays five times the going rate for its standing.
     "Honest": PersonaConfig("Honest", 5.0, 1.0, 1.0, vengeance=0.0, privacy=0.0,
                             policy="unconditional", forgive_below=0.5),
     # Prices betrayal at face value and takes it when it pays.

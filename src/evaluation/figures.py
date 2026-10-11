@@ -1,16 +1,13 @@
 """The six report figures.
 
-One function per figure, each taking already-collected data and returning a
-matplotlib Figure. Nothing here runs a game — `scripts/make_figures.py` does
-the experiments and hands the results over, so a figure can be redrawn
-without replaying anything.
+One function per figure, from data `scripts/make_figures.py` collected.
 
     1. betrayal rate vs turn, per persona
     2. Vcoop at the moment of a break, vs turn
     3. rating by persona x search horizon
     4. turns to coalition
     5. reliability diagram (with the Brier score)
-    6. win rate vs adjudications per turn, expectiminimax vs MCTS
+    6. win rate vs adjudications per turn, expectimax vs MCTS vs regret matching
 """
 
 from typing import Dict, List, Any, Optional
@@ -59,12 +56,7 @@ def betrayal_rate_vs_turn(series: Dict[str, List[Optional[float]]]):
 
 
 def vcoop_at_break(rows: List[Dict[str, Any]]):
-    """Figure 2. One point per broken deal: what the partner was still worth.
-
-    The claim the figure has to support is that betrayal is not scripted —
-    breaks cluster where Vcoop has already collapsed, or where the horizon
-    term has.
-    """
+    """Figure 2. One point per broken deal: what the partner was still worth."""
     fig, ax = plt.subplots(figsize=(7, 4))
     for persona in sorted({r["persona"] for r in rows}):
         pts = [r for r in rows if r["persona"] == persona]
@@ -147,15 +139,9 @@ def reliability_diagram(bins: List[Dict[str, Any]], brier: Optional[float],
 
 
 def win_rate_vs_budget(rows: List[Dict[str, Any]]):
-    """Figure 6. rows: {search, adjudications, win_rate, win_rate_lo/hi, games}.
-
-    The comparison the report asks for is at *equal budget*, which is why
-    both searches count adjudications through the same counter. Each point
-    carries its 95% interval: at two games per cell the old version of this
-    figure plotted only 0.0 and 1.0 and looked decisive.
-    """
+    """Figure 6. rows: {search, adjudications, win_rate, win_rate_lo/hi, games}."""
     fig, ax = plt.subplots(figsize=(7, 4))
-    colours = {"expectiminimax": "#5b7db1", "mcts": "#c1666b"}
+    colours = {"expectimax": "#5b7db1", "mcts": "#c1666b", "regret": "#6a9f58"}
     for search in sorted({r["search"] for r in rows}):
         pts = sorted((r for r in rows if r["search"] == search),
                      key=lambda r: r["adjudications"])
