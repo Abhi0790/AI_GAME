@@ -146,7 +146,7 @@ EAS: AEG Smy Syr ION
 BLA: Rum Sev Arm Ank Con Bul/ec
 """
 
-# On a 100 x 100 grid, scaled to the dashboard's 500 x 500.
+# On a 100 x 100 grid, drawn 800 x 500 to fill the dashboard's wide panel.
 POSITIONS = """
 NAO 8 22  NWG 40 8  BAR 68 3  Cly 24 21  Edi 28 24  Lvp 24 29  Yor 29 31  Wal 22 36
 Lon 29 37  IRI 14 35  ENG 22 43  NTH 36 27  SKA 46 23  HEL 39 33  Den 45 29  Nwy 46 14
@@ -187,11 +187,12 @@ def standard_board(max_turns: int = 20, win_centers: int = STANDARD_WIN,
         home_builds=home_builds,
         sieges=sieges,
         fortresses=[t for ts in homes.values() for t in ts] if fortified_homes else [],
-        positions={cells[i]: (float(cells[i + 1]) * 5, float(cells[i + 2]) * 5)
+        positions={cells[i]: (float(cells[i + 1]) * 8, float(cells[i + 2]) * 5)
                    for i in range(0, len(cells), 3)},
         army_adjacency=army,
         fleet_adjacency=fleet,
         start_fleets=START_FLEETS.split(),
+        seat_names={v: k for k, v in POWERS.items()},
     )
 
 

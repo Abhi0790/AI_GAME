@@ -69,12 +69,15 @@ class Board:
     fleet_adjacency: Dict[str, List[str]] = field(default_factory=dict)
     # Locations where a seat starts with a fleet; its other homes start armies.
     start_fleets: List[str] = field(default_factory=list)
+    # Display names for seats ("Austria"); empty means the colour is the name.
+    seat_names: Dict[Player, str] = field(default_factory=dict)
 
     def __post_init__(self):
         put = object.__setattr__
         put(self, "home_centers",
             {Player(p): list(t) for p, t in self.home_centers.items()})
         put(self, "positions", {t: tuple(xy) for t, xy in self.positions.items()})
+        put(self, "seat_names", {Player(p): n for p, n in self.seat_names.items()})
         put(self, "_centre_set", set(self.supply_centers))
         put(self, "_fortress_set", set(self.fortresses))
         put(self, "army_adjacency", {t: list(n) for t, n in self.army_adjacency.items()})
@@ -108,6 +111,7 @@ class Board:
             "army_adjacency": {t: list(n) for t, n in self.army_adjacency.items()},
             "fleet_adjacency": {t: list(n) for t, n in self.fleet_adjacency.items()},
             "start_fleets": list(self.start_fleets),
+            "seat_names": {p.value: n for p, n in self.seat_names.items()},
         }
 
     def starting_units(self) -> List[Unit]:
@@ -230,7 +234,7 @@ def _polar(angle_index: float, steps: int, radius: float) -> Tuple[float, float]
 
 
 def ring_board(seats: int | Sequence[Player] = DEFAULT_SEATS,
-               homes_per_player: int = DEFAULT_HOMES_PER_PLAYER,
+               homes_per_player: int | Sequence[int] = DEFAULT_HOMES_PER_PLAYER,
                *,
                win_centers: Optional[int] = None,
                win_fraction: float = DEFAULT_WIN_FRACTION,
@@ -242,7 +246,8 @@ def ring_board(seats: int | Sequence[Player] = DEFAULT_SEATS,
                sieges: bool = False) -> Board:
     """Build a ring map for any seat count.
 
-    Home centres form one ring, `homes_per_player` per seat. Each boundary
+    Home centres form one ring, `homes_per_player` per seat, or one count per
+    seat for an uneven start (no symmetry is then claimed). Each boundary
     between neighbouring seats gets one middle territory, and those form a ring
     of their own.
 
@@ -261,15 +266,22 @@ def ring_board(seats: int | Sequence[Player] = DEFAULT_SEATS,
     players = list(Player)[:seats] if isinstance(seats, int) else list(seats)
     if len(set(players)) != n:
         raise ValueError("the same player cannot hold two seats")
-    if homes_per_player < 1:
+    counts = ([homes_per_player] * n if isinstance(homes_per_player, int)
+              else list(homes_per_player))
+    if len(counts) != n:
+        raise ValueError(f"{len(counts)} home counts for {n} seats")
+    if min(counts) < 1:
         raise ValueError("every seat needs at least one home centre")
+    even = len(set(counts)) == 1
+    H = counts[0]
+    ends = [sum(counts[:j + 1]) for j in range(n)]          # seat j's homes end before ends[j]
     if not 0 <= outer_rings <= len(OUTER_RING_LETTERS):
         raise ValueError(f"outer_rings must be 0..{len(OUTER_RING_LETTERS)}, not {outer_rings}")
 
     if not 0 < win_fraction <= 1:
         raise ValueError(f"win_fraction must be in (0, 1], not {win_fraction}")
-    homes = {p: [f"{SEAT_CODES[p]}{j + 1}" for j in range(homes_per_player)]
-             for p in players}
+    homes = {p: [f"{SEAT_CODES[p]}{j + 1}" for j in range(c)]
+             for p, c in zip(players, counts)}
     ring = [t for p in players for t in homes[p]]            # home ring, in seat order
     k = len(ring)
 
@@ -302,8 +314,8 @@ def ring_board(seats: int | Sequence[Player] = DEFAULT_SEATS,
         link(ring[i], ring[(i + 1) % k])
     for j in range(n):                                        # the middle ring
         link(gaps[j], gaps[(j + 1) % n])
-        link(gaps[j], ring[(j * homes_per_player + homes_per_player - 1) % k])
-        link(gaps[j], ring[(j * homes_per_player + homes_per_player) % k])
+        link(gaps[j], ring[(ends[j] - 1) % k])
+        link(gaps[j], ring[ends[j] % k])
     for r, layer in enumerate(outer):                         # the outer rings
         inside = outer[r - 1] if r else ring
         for i in range(k):
@@ -321,25 +333,25 @@ def ring_board(seats: int | Sequence[Player] = DEFAULT_SEATS,
         positions.update({t: _polar(i, k, _GAP_RADIUS + step * (r + 2))
                           for i, t in enumerate(layer)})
     positions.update({
-        g: _polar(j * homes_per_player + homes_per_player - 0.5, k, _GAP_RADIUS)
+        g: _polar(ends[j] - 0.5, k, _GAP_RADIUS)
         for j, g in enumerate(gaps)
     })
 
     # Reflection r_j flips the ring about the axis through gap j: seat i lands
     # on seat 2j+1-i, gap g on gap 2j-g. Together they are transitive on seats.
     symmetries = []
-    for j in range(n):
+    for j in range(n if even else 0):
         sigma = {}
         for i, p in enumerate(players):
-            for h in range(homes_per_player):
+            for h in range(H):
                 image = players[(2 * j + 1 - i) % n]
-                sigma[homes[p][h]] = homes[image][homes_per_player - 1 - h]
+                sigma[homes[p][h]] = homes[image][H - 1 - h]
         for g in range(n):
             sigma[gaps[g]] = gaps[(2 * j - g) % n]
         # The same reflection on ring indices: i -> (2j+2)H - 1 - i.
         for layer in outer:
             for i in range(k):
-                sigma[layer[i]] = layer[((2 * j + 2) * homes_per_player - 1 - i) % k]
+                sigma[layer[i]] = layer[((2 * j + 2) * H - 1 - i) % k]
         symmetries.append(sigma)
 
     return Board(
@@ -349,7 +361,7 @@ def ring_board(seats: int | Sequence[Player] = DEFAULT_SEATS,
         # A share of the centres, floored above what a seat already starts with.
         win_centers=(win_centers if win_centers is not None
                      else max(int(len(supply_centers) * win_fraction + 1e-9),
-                              homes_per_player + 1)),
+                              max(counts) + 1)),
         max_turns=max_turns,
         home_builds=home_builds,
         sieges=sieges,
@@ -465,6 +477,11 @@ def unit_moves(unit: Unit) -> List[str]:
     if unit.unit_type == UnitType.FLEET:
         return _ACTIVE.fleet_adjacency.get(unit.location, [])
     return (_ACTIVE.army_adjacency or _ACTIVE.adjacency).get(unit.territory, [])
+
+
+def reach(unit: Unit) -> List[str]:
+    """Provinces a unit can step to without a convoy."""
+    return list(dict.fromkeys(province(loc) for loc in unit_moves(unit)))
 
 
 def can_reach(unit: Unit, territory: str) -> bool:

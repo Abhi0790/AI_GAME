@@ -6,6 +6,7 @@ import Inspector from "./components/Inspector.jsx";
 import Seat, { collectOrders } from "./components/Seat.jsx";
 import ThinkPanel from "./components/Think.jsx";
 import Setup from "./components/Setup.jsx";
+import CentresChart from "./components/Chart.jsx";
 import {
   LogPanel, TalksPanel, DealsPanel, TrustPanel, WhyPanel, CalibPanel, TurnSummary,
 } from "./components/Panels.jsx";
@@ -78,6 +79,13 @@ export default function App() {
     } catch (e) { setError(String(e)); }
   }, []);
 
+  // ?replay=name.json&turn=N opens that saved replay at that turn, so it can be linked to.
+  useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    const name = q.get("replay"), turn = Number(q.get("turn"));
+    if (name) openReplay(name).then(() => turn > 0 && setViewing(turn - 1));
+  }, [openReplay]);
+
   // A game carries its own board; defaults cover the persona list and the
   // moment before the first game exists.
   const board = useMemo(
@@ -138,7 +146,9 @@ export default function App() {
         chaos_seat: config.chaos || null,
         map: config.standard_map ? "standard" : "ring",
         n_seats: Number(config.n_seats),
-        homes_per_player: Number(config.homes_per_player),
+        homes_per_player: String(config.homes_per_player).includes(",")
+          ? String(config.homes_per_player).split(",").map(Number)
+          : Number(config.homes_per_player),
         outer_rings: Number(config.outer_rings),
         max_turns: Number(config.max_turns),
         win_centers: config.win_centers === "" ? null : Number(config.win_centers),
@@ -299,7 +309,8 @@ export default function App() {
               >
                 <div className="who">
                   <span className="dot" style={{ background: COLOR[p] }} />
-                  {p}
+                  {board?.seat_names?.[p] ?? p}
+                  {board?.seat_names?.[p] && <small>{p}</small>}
                 </div>
                 <div className="n">
                   {scores[p] ?? 0}
@@ -323,6 +334,11 @@ export default function App() {
               </button>
             ))}
           </div>
+
+          <CentresChart
+            states={history.length ? [...history.map((h) => h.state), game?.state ?? replay?.final_state] : null}
+            players={board?.players} names={board?.seat_names} winAt={board?.win_centers}
+            viewing={viewing} onPick={setViewing} />
 
           <div className="scrub">
             <span className="lbl">

@@ -101,7 +101,12 @@ serially.
 
 In the dashboard: **New game** opens a form for seed, persona per seat,
 search, budget and negotiation rounds, and the effective config
-is shown so a screenshot is reproducible. **seat** to play one yourself,
+is shown so a screenshot is reproducible. Orders are drawn in the ordering
+player's colour (solid if the move went through, dashed if it bounced, dotted
+for support, retreats in grey); on the standard map seas are blue and seats
+carry their country names. Under the score cards a chart tracks each player's
+centres by turn; click it to jump to a turn. A saved replay opens directly at
+`/?replay=<file>.json&turn=<n>`, so a position can be linked to. **seat** to play one yourself,
 **chaos** to seat a deliberately malfunctioning player. The slider replays
 turns already played; left/right arrows step, space advances.
 
@@ -191,12 +196,21 @@ army by sea together with their own fleet ordered to carry it. `--seats`,
 python scripts/run_headless.py --standard --turns 20 --budget 300
 ```
 
+A low budget makes games faster but not comparable: at 300 adjudications the
+planner often finds no order set that keeps its promises, and every persona
+breaks about a third of them, against 3-13% at the default 1500.
+
 None of those numbers are fixed. Every script takes `--seats` (2–8), `--homes`
 (home centres, and so units, per player), `--win-centers`, `--win-fraction` (the
 share of the board's centres that wins when `--win-centers` is not given, 0.6 by
 default) and `--turns`, and
 the dashboard has the same controls; the map is generated to match and is proved
 symmetric before it is played on. The default is exactly the board above.
+
+`--homes 3,2,2,2` gives each seat its own number of home centres instead, for an
+uneven start; such a board claims no symmetry. Analysis then prints wins and
+centres per seat, and each persona's centres against the average of the seats
+it sat in, so a strong seat is not read as a strong persona.
 
 `--outer-rings N` (0–5, the dashboard's "outer rings") adds N rings of neutral
 supply centres outside the home ring, one per home centre each, for a larger

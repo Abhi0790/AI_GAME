@@ -47,7 +47,7 @@ class GameConfig:
     # ── the board (`board`, a Board.to_dict(), overrides `map`) ─────────
     map: str = "ring"                       # "ring" | "standard" (7 powers, fleets)
     n_seats: int = DEFAULT_SEATS
-    homes_per_player: int = DEFAULT_HOMES_PER_PLAYER
+    homes_per_player: int | List[int] = DEFAULT_HOMES_PER_PLAYER  # or one count per seat
     win_centers: Optional[int] = None       # None -> win_fraction of the board's centres
     win_fraction: float = DEFAULT_WIN_FRACTION
     max_turns: int = DEFAULT_MAX_TURNS
@@ -149,6 +149,12 @@ class GameConfig:
 
 # ── CLI ─────────────────────────────────────────────────────────────────
 
+def _homes(text: str) -> int | List[int]:
+    """"2" -> 2, "3,2,2,2" -> [3, 2, 2, 2]."""
+    counts = [int(c) for c in text.split(",")]
+    return counts if len(counts) > 1 else counts[0]
+
+
 def add_game_args(parser: argparse.ArgumentParser, budget: int = 1500) -> None:
     """Add the board and agent settings as CLI flags."""
     g = parser.add_argument_group("game")
@@ -157,8 +163,9 @@ def add_game_args(parser: argparse.ArgumentParser, budget: int = 1500) -> None:
                         "--seats, --homes and --outer-rings apply to the ring only")
     g.add_argument("--seats", type=int, default=DEFAULT_SEATS,
                    help=f"players at the table (default {DEFAULT_SEATS})")
-    g.add_argument("--homes", type=int, default=DEFAULT_HOMES_PER_PLAYER,
-                   help="home centres per player, one unit starts on each "
+    g.add_argument("--homes", type=_homes, default=DEFAULT_HOMES_PER_PLAYER,
+                   help="home centres per player, one unit starts on each, or one "
+                        f"count per seat for an uneven start, e.g. 3,2,2,2 "
                         f"(default {DEFAULT_HOMES_PER_PLAYER})")
     g.add_argument("--win-centers", type=int, default=None,
                    help="centres that win outright (default: --win-fraction of the board)")

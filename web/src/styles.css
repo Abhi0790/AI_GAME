@@ -21,8 +21,9 @@
   --warn-line: rgba(227, 184, 102, .3);
   --red: #d4605a;
   --blue: #5b8fd6;
-  --green: #5aa878;
-  --gold: #c9a24a;
+  --green: #389c76;
+  --gold: #b98c1a;
+  --sea: #142238;
   --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Consolas, monospace;
   --r: 8px;
@@ -107,8 +108,11 @@ aside {
 }
 .board svg { display: block; width: 100%; height: auto; max-height: 54vh; }
 .edge { stroke: var(--line-2); stroke-width: 1.4; }
+.edge.wet { stroke: #23385a; stroke-dasharray: 2 3; }
 .node { stroke: var(--bg); stroke-width: 1.5; }
 .node.sc { stroke-width: 2.5; }
+.node.sea { stroke: #2a4468; }
+.nlabel.sea { fill: #7f9cc4; font-style: italic; font-weight: 500; }
 .nlabel {
   font: 600 10px var(--mono); fill: var(--text); text-anchor: middle;
   dominant-baseline: central; pointer-events: none;
@@ -122,10 +126,12 @@ aside {
   font: 700 8px var(--mono); text-anchor: middle; dominant-baseline: central;
   pointer-events: none; opacity: .75;
 }
-.arrow { fill: none; stroke-width: 2.2; }
-.arrow.ok { stroke: var(--good); }
-.arrow.no { stroke: var(--bad); stroke-dasharray: 5 4; }
-.arrow.sup { stroke: var(--accent); stroke-width: 1.4; stroke-dasharray: 3 3; opacity: .8; }
+/* Stroke colour is the ordering player's, set on the element. */
+.arrow { fill: none; stroke-width: 2.4; stroke-linecap: round; }
+.arrow.no { stroke-dasharray: 5 4; opacity: .7; }
+.arrow.sup { stroke-width: 1.5; stroke-dasharray: 1 3; opacity: .85; }
+.arrow.cvy { stroke-width: 1.5; stroke-dasharray: 6 2 1 2; opacity: .85; }
+.arrow.ret { stroke-width: 1.6; stroke-dasharray: 2 2; }
 
 /* ── scores ──────────────────────────────────────────────────────── */
 /* auto-fit, not repeat(4): the table seats 2-8. */
@@ -300,9 +306,12 @@ main.verbose.detailed { grid-template-columns: minmax(0, 1fr) 560px 460px; }
 }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
 .legend .ln { display: inline-block; width: 18px; border-top: 2px solid; }
-.legend .ln.ok { border-color: var(--good); }
-.legend .ln.no { border-color: var(--bad); border-top-style: dashed; }
-.legend .ln.sup { border-color: var(--accent); border-top-style: dotted; }
+.legend .ln { border-color: var(--muted); }
+.legend .ln.no { border-top-style: dashed; }
+.legend .ln.sup { border-top-style: dotted; }
+.legend .ln.cvy { border-top-style: dashed; border-top-width: 1px; }
+.legend .ln.ret { border-color: #9aa0aa; border-top-style: dotted; }
+.legend .sw.sea { background: var(--sea); box-shadow: inset 0 0 0 1px #2a4468; }
 .legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--blue); }
 .legend .sw.sc { width: 13px; height: 13px; box-shadow: inset 0 0 0 2px var(--line-2); }
 .legend .sw.faded { opacity: .45; }
@@ -465,3 +474,38 @@ aside { background: var(--panel); }
 .msg.counter .verb { color: var(--warn); }
 .msg.threat .verb, .msg.threat .terms { color: var(--bad); }
 .msg-tags { display: flex; gap: 4px; }
+
+/* ── centres-by-turn chart ───────────────────────────────────────── */
+.score .who small { margin-left: 6px; font-size: 10px; font-weight: 400; color: var(--dim); }
+.chart {
+  position: relative; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 12px; padding: 10px 12px 6px; box-shadow: var(--shadow);
+}
+.chart-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; margin-bottom: 4px; }
+.chart-title { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 11px; color: var(--muted); }
+.chart-legend span, .chart-tip span { display: inline-flex; align-items: center; gap: 5px; }
+.chart-legend i, .chart-tip i { width: 10px; height: 2px; border-radius: 1px; display: inline-block; }
+.chart svg { display: block; width: 100%; height: auto; cursor: crosshair; }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .win { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 4 4; }
+.chart .tick { font: 10px var(--mono); fill: var(--dim); text-anchor: end; dominant-baseline: central; }
+.chart .tick.x { text-anchor: middle; }
+.chart .win-label { text-anchor: start; fill: var(--muted); }
+.chart .cursor { stroke: var(--line-2); stroke-width: 1; }
+.chart .halo { fill: none; stroke: var(--panel); stroke-width: 5; stroke-linejoin: round; }
+.chart .series { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart .dot { stroke: var(--panel); stroke-width: 2; }
+.chart .end { font: 11px var(--sans); fill: var(--muted); dominant-baseline: central; }
+.chart-tip {
+  position: absolute; top: 34px; transform: translateX(-50%); pointer-events: none;
+  display: grid; gap: 2px; padding: 6px 9px; min-width: 130px;
+  background: var(--panel-2); border: 1px solid var(--line-2); border-radius: 8px;
+  font-size: 11px; color: var(--text); box-shadow: var(--shadow);
+}
+.chart-tip b { font-weight: 600; color: var(--muted); }
+.chart-tip em { margin-left: auto; padding-left: 12px; font-style: normal; font-family: var(--mono); }
+.chart-table summary { font-size: 11px; color: var(--dim); cursor: pointer; padding: 2px 0; }
+.chart-table table { width: 100%; border-collapse: collapse; font: 11px var(--mono); color: var(--muted); }
+.chart-table th, .chart-table td { padding: 2px 6px; text-align: right; border-bottom: 1px solid var(--line); }
+.chart-table th:first-child, .chart-table td:first-child { text-align: left; }

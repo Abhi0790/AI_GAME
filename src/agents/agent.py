@@ -6,7 +6,7 @@ from src.common.schemas import (
     Player, GameState, Order, OrderType, Commitment, CommitmentType, Message, Unit,
     MessageType, TrustTrace, BeliefSnapshot, obligated_parties, leaders,
 )
-from src.engine.board import players, get_adjacent, is_supply_center, province, built_unit, unit_moves
+from src.engine.board import players, reach, is_supply_center, province, built_unit, unit_moves
 from src.agents.trust import model as trust_params
 from src.agents.trust.model import TrustModel
 from src.agents.trust.rules import RuleEngine, OutcomeRule, PublicRecordRule
@@ -133,8 +133,8 @@ class Agent:
         mine = [t for t, o in state.supply_centers.items() if o == self.player]
         weights = {}
         for p in others:
-            reach = {a for u in state.units if u.player == p for a in get_adjacent(u.territory)}
-            weights[p] = 2.0 * sum(1 for t in mine if t in reach) / max(1, len(mine))
+            theirs = {a for u in state.units if u.player == p for a in reach(u)}
+            weights[p] = 2.0 * sum(1 for t in mine if t in theirs) / max(1, len(mine))
         return set(), weights, set()
 
     def retaliation_rate(self, p: Player) -> float:
@@ -365,7 +365,7 @@ class Agent:
         picks = picks[:64]
         if not picks:
             return []
-        def reach(pick):
+        def centres_near(pick):
             """Centres not mine the built units could step to; breaks army/fleet ties."""
             if kind != "build":
                 return 0
@@ -373,7 +373,7 @@ class Agent:
                        and state.supply_centers.get(province(loc)) != self.player
                        for t in pick for loc in unit_moves(built_unit(self.player, t)))
         return max(picks, key=lambda pick: (evaluate_state(
-            state.model_copy(update={"units": after(pick)}), self.player), reach(pick)))
+            state.model_copy(update={"units": after(pick)}), self.player), centres_near(pick)))
 
     def vote_draw(self, state: GameState, stalled: int) -> bool:
         """Share the game once it has stalled, unless I lead alone."""

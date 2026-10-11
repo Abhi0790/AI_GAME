@@ -2,8 +2,10 @@
 export const VIEWBOX = 500;
 
 export const COLOR = {
-  Red: "#d4605a", Blue: "#5b8fd6", Green: "#5aa878", Gold: "#c9a24a",
-  Purple: "#c04fd0", Orange: "#d68a4e", Teal: "#4fa8a8", Pink: "#d478a8",
+  // Checked with the dataviz validator on the dark panel: every pair in seat
+  // order passes; any two of seven cannot, so the board also letters each seat.
+  Red: "#d4605a", Blue: "#5b8fd6", Green: "#389c76", Gold: "#b98c1a",
+  Purple: "#c04fd0", Orange: "#c9783a", Teal: "#21a3b8", Pink: "#d478a8",
 };
 
 export const fmt = (n, places = 2) =>

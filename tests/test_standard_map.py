@@ -151,3 +151,11 @@ def test_a_standard_game_plays_and_replays(tmp_path):
     assert {u.location: u.unit_type for u in states[-1].units} == \
         {u.location: u.unit_type for u in runner.state.units}
     assert any(u.unit_type == UnitType.FLEET for u in states[-1].units)
+
+
+def test_agents_see_what_each_unit_can_reach():
+    from src.engine.board import reach
+    with use_board(BOARD):
+        assert set(reach(unit(E, "Lon"))) == {"Yor", "Wal"}
+        assert set(reach(unit(E, "Lon", "F"))) == {"Yor", "Wal", "NTH", "ENG"}
+        assert "Mar" not in reach(unit(F, "Spa/nc", "F"))

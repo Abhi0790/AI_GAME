@@ -50,7 +50,11 @@ export default function Setup({ open, onClose, onStart, config, setConfig, defau
             <h3>Board</h3>
             <div className="fields">
               {num({ k: "n_seats", label: "Seats", min: "2", max: (defaults?.seat_colours ?? []).length || 8 })}
-              {num({ k: "homes_per_player", label: "Homes per seat", min: "1", hint: "Home centres per seat; one unit starts on each." })}
+              <label className="field" title="Home centres per seat; one unit starts on each. One count per seat (3,2,2,2) makes an uneven start." key="homes_per_player">
+                <span>Homes per seat</span>
+                <input type="text" inputMode="numeric" pattern="[0-9]+(,[0-9]+)*"
+                       value={config.homes_per_player} onChange={set("homes_per_player")} />
+              </label>
               {num({ k: "outer_rings", label: "Outer rings", min: "0", max: "5", hint: "Rings of neutral centres outside the home ring." })}
               {num({ k: "order_noise", label: "Order noise", min: "0", max: "1", step: "0.05", hint: "Chance each order is lost and the unit holds instead." })}
             </div>

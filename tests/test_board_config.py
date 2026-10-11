@@ -326,3 +326,24 @@ def test_a_game_plays_on_a_board_with_outer_rings():
     result = play(GameConfig(seed=1, n_seats=4, outer_rings=1, max_turns=2,
                              node_budget=200))
     assert result.state.turn > 1
+
+
+def test_uneven_homes_make_an_asymmetric_ring():
+    b = ring_board(4, [3, 2, 2, 1])
+    assert [len(h) for h in b.home_centers.values()] == [3, 2, 2, 1]
+    assert not b.symmetries
+    assert b.win_centers > 3
+    # The middle ring still joins each seat's last home to the next seat's first.
+    assert {"R3", "B1"} <= set(b.adjacency["N1"])
+    with pytest.raises(ValueError):
+        ring_board(4, [2, 2])
+
+
+def test_seat_adjusted_centres_remove_the_seat_advantage():
+    from src.common.schemas import Player
+    from src.evaluation.metrics import seat_adjusted_centres
+    R, B = Player.RED, Player.BLUE
+    # Red's seat is worth 2 more centres whoever sits there; the personas are equal.
+    games = [{R: 5, B: 3}, {R: 5, B: 3}]
+    personas = [{R: "Honest", B: "Opportunist"}, {R: "Opportunist", B: "Honest"}]
+    assert seat_adjusted_centres(games, personas) == {"Honest": [0.0, 0.0], "Opportunist": [0.0, 0.0]}

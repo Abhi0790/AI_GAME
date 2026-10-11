@@ -10,6 +10,7 @@ from src.engine.board import players
 from src.common.schemas import Player, GameState, leaders
 from src.evaluation.metrics import (
     deal_mix,
+    seat_adjusted_centres,
     pair_trust_divergence,
     supply_center_timeline,
     betrayal_events,
@@ -172,9 +173,11 @@ def print_tournament_summary(
            if n < MIN_GAMES else ""))
 
     wr = win_rates(game_results, all_sharers)
-    print("\nWin Rates by seat (should be flat — the personas rotate):")
+    print("\nBy seat (flat on a symmetric board, since the personas rotate):")
     for p in players():
-        print(f"  {p.value:6s}: {fmt_rate(round(wr[p] * n), n)}")
+        centres = [g[p] for g in game_results]
+        print(f"  {p.value:6s}: wins {fmt_rate(round(wr[p] * n), n)}   "
+              f"centres {fmt_mean(centres, '{:.2f}')}")
 
     print("\nAverage Betrayal Rates by seat:")
     for p in players():
@@ -201,6 +204,10 @@ def print_tournament_summary(
         print("\nWin share by Persona:")
         for name, w in sorted(wins.items(), key=lambda r: -r[1]):
             print(f"  {name:12s}: {fmt_rate(round(w), n)}")
+
+        print("\nCentres by Persona, against the seat's own average:")
+        for name, diffs in sorted(seat_adjusted_centres(game_results, all_personas).items()):
+            print(f"  {name:12s}: {fmt_mean(diffs, '{:.2f}')}")
 
     print("=" * 60)
 

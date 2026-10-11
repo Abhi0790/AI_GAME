@@ -18,7 +18,7 @@ import threading
 import uuid
 import random
 from contextlib import contextmanager
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -290,6 +290,9 @@ def _board_data(board) -> dict:
         "win_centers": board.win_centers,
         "home_builds": board.home_builds,
         "fleet_adjacency": board.fleet_adjacency,
+        "seas": [t for t in board.territories
+                 if board.army_adjacency and t not in board.army_adjacency],
+        "seat_names": {p.value: n for p, n in board.seat_names.items()},
     }
 
 
@@ -306,7 +309,7 @@ class NewGame(BaseModel):
     seed: Optional[int] = None            # None -> random
     map: str = "ring"                     # "ring" | "standard"
     n_seats: int = DEFAULT_SEATS
-    homes_per_player: int = DEFAULT_HOMES_PER_PLAYER
+    homes_per_player: Union[int, List[int]] = DEFAULT_HOMES_PER_PLAYER  # or one per seat
     win_centers: Optional[int] = None     # None -> win_fraction of the centres
     win_fraction: float = DEFAULT_WIN_FRACTION
     max_turns: int = DEFAULT_MAX_TURNS

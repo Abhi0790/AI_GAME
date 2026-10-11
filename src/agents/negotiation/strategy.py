@@ -20,7 +20,7 @@ from src.agents.planner.planner import (
 from src.agents.trust.model import TrustModel
 from src.engine.adjudicator import resolve
 from src.engine.orders import generate_all_order_sets
-from src.engine.board import get_adjacent, is_supply_center, max_turns, players
+from src.engine.board import reach, is_supply_center, max_turns, players
 
 # Deals whose counterfactual gain is smaller than this are noise, not offers.
 MIN_DEAL_VALUE = 0.05
@@ -133,11 +133,11 @@ class NegotiationStrategy:
             partner = u.player
             if owed and partner == (deal.players[1] if deal else partner):
                 # Honouring: anywhere but the owed squares. Breaking: into one of them.
-                clear = [a for a in get_adjacent(u.territory) if a not in owed]
+                clear = [a for a in reach(u) if a not in owed]
                 kept.append(Order(player=partner, unit_territory=u.territory,
                                   order_type=OrderType.MOVE if clear else OrderType.HOLD,
                                   target=clear[0] if clear else None))
-                grab = next((a for a in get_adjacent(u.territory) if a in owed), None)
+                grab = next((a for a in reach(u) if a in owed), None)
                 broken.append(Order(player=partner, unit_territory=u.territory,
                                     order_type=OrderType.MOVE if grab else OrderType.HOLD,
                                     target=grab))
@@ -150,20 +150,20 @@ class NegotiationStrategy:
                 kept.append(Order(player=partner, unit_territory=u.territory,
                                   order_type=OrderType.MOVE, target=deal.target_territory))
             elif (deal is not None and deal.commitment_type == CommitmentType.SUPPORT
-                  and deal.target_territory in get_adjacent(u.territory)):
+                  and deal.target_territory in reach(u)):
                 kept.append(Order(player=partner, unit_territory=u.territory,
                                   order_type=OrderType.SUPPORT,
                                   target=deal.target_territory,
                                   supported_from=deal.supported_from))
             else:
-                safe = [a for a in get_adjacent(u.territory) if a not in mine]
+                safe = [a for a in reach(u) if a not in mine]
                 target = next((a for a in safe if is_supply_center(a)), None)
                 kept.append(Order(player=partner, unit_territory=u.territory,
                                   order_type=OrderType.MOVE if target else OrderType.HOLD,
                                   target=target))
 
             # Exploiting: walks straight onto whatever of mine it can reach.
-            grab = next((a for a in get_adjacent(u.territory) if a in mine), None)
+            grab = next((a for a in reach(u) if a in mine), None)
             broken.append(Order(player=partner, unit_territory=u.territory,
                                 order_type=OrderType.MOVE if grab else OrderType.HOLD,
                                 target=grab))
@@ -244,10 +244,9 @@ class NegotiationStrategy:
         elif (deal.commitment_type == CommitmentType.EXCHANGE
               and deal.players[1:2] == [self.player]):
             keep_out = deal.dmz_territories or []
-        reach = {a for u in state.units if u.player == self.player
-                 for a in get_adjacent(u.territory)}
+        near = {a for u in state.units if u.player == self.player for a in reach(u)}
         return any(is_supply_center(t) and state.supply_centers.get(t) != self.player
-                   and t in reach for t in keep_out)
+                   and t in near for t in keep_out)
 
     # ------------------------------------------------------------------
     # Proposal generation
@@ -266,10 +265,10 @@ class NegotiationStrategy:
 
         # DMZ on centres we both border and neither of us owns.
         contested = {
-            t for u in my_units for t in get_adjacent(u.territory)
+            t for u in my_units for t in reach(u)
             if is_supply_center(t)
             and state.supply_centers.get(t) not in (self.player, partner)
-            and any(t in get_adjacent(ou.territory) for ou in their_units)
+            and any(t in reach(ou) for ou in their_units)
         }
         if contested:
             offers.append(msg(commitment_type=CommitmentType.DMZ, turns=2,
@@ -277,8 +276,8 @@ class NegotiationStrategy:
 
         # Support a move: their unit into a square I also border.
         for ou in their_units:
-            for adj in get_adjacent(ou.territory):
-                if any(adj in get_adjacent(mu.territory) for mu in my_units) \
+            for adj in reach(ou):
+                if any(adj in reach(mu) for mu in my_units) \
                         and state.supply_centers.get(adj) not in (self.player, partner):
                     offers.append(msg(commitment_type=CommitmentType.SUPPORT, turns=1,
                                       target_territory=adj, supported_from=ou.territory))
@@ -286,7 +285,7 @@ class NegotiationStrategy:
 
         # Support a hold on a centre of theirs next to my units.
         for ou in their_units:
-            if any(ou.territory in get_adjacent(mu.territory) for mu in my_units) \
+            if any(ou.territory in reach(mu) for mu in my_units) \
                     and is_supply_center(ou.territory):
                 offers.append(msg(commitment_type=CommitmentType.SUPPORT, turns=1,
                                   target_territory=ou.territory))
@@ -294,14 +293,14 @@ class NegotiationStrategy:
 
         # An exchange: I support their move now; next turn they keep out of somewhere I want.
         repayment = sorted({
-            t for u in my_units for t in get_adjacent(u.territory)
+            t for u in my_units for t in reach(u)
             if is_supply_center(t)
             and state.supply_centers.get(t) != partner
-            and any(t in get_adjacent(ou.territory) for ou in their_units)
+            and any(t in reach(ou) for ou in their_units)
         })
         for ou in their_units:
-            gift = next((adj for adj in get_adjacent(ou.territory)
-                         if any(adj in get_adjacent(mu.territory) for mu in my_units)
+            gift = next((adj for adj in reach(ou)
+                         if any(adj in reach(mu) for mu in my_units)
                          and state.supply_centers.get(adj) not in (self.player, partner)),
                         None)
             owed = [t for t in repayment if t != gift]

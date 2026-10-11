@@ -6,7 +6,7 @@ from src.common.schemas import (
 from src.engine.adjudicator import resolve, verify_commitments
 from src.engine.orders import generate_all_order_sets, generate_orders_for_unit
 from src.engine.board import (
-    is_supply_center, get_adjacent, max_turns, players, win_centers, home_centers, sieges,
+    is_supply_center, reach, max_turns, players, win_centers, home_centers, sieges,
 )
 from src.agents.trust.model import TrustModel, break_weight
 from src.agents.planner.regret import regret_matching, exploitability
@@ -98,7 +98,7 @@ def evaluate_state(state: GameState, player: Player) -> float:
 
     # 2. Centres we threaten: not ours, and one move away.
     threatening = {
-        adj for u in my_units for adj in get_adjacent(u.territory)
+        adj for u in my_units for adj in reach(u)
         if is_supply_center(adj) and state.supply_centers.get(adj) != player
     }
     score += len(threatening) * THREATENS_VALUE
@@ -110,7 +110,7 @@ def evaluate_state(state: GameState, player: Player) -> float:
     # 3. Our centres under threat: an enemy unit is one move away.
     enemy_reach = {
         adj for u in state.units if u.player != player
-        for adj in get_adjacent(u.territory)
+        for adj in reach(u)
     }
     under_threat = {
         t for t, owner in state.supply_centers.items()
@@ -121,7 +121,7 @@ def evaluate_state(state: GameState, player: Player) -> float:
     # 4. Units and mobility.
     score += len(my_units) * UNIT_VALUE
     score += MOBILITY_VALUE * sum(
-        1 for u in my_units for adj in get_adjacent(u.territory)
+        1 for u in my_units for adj in reach(u)
         if adj not in my_squares
     )
 
@@ -154,8 +154,8 @@ def cooperation_value(state: GameState, me: Player, partner: Player) -> float:
     if not partner_units or not my_units:
         return 0.0
 
-    partner_reach = {t for u in partner_units for t in get_adjacent(u.territory)}
-    my_reach = {t for u in my_units for t in get_adjacent(u.territory)}
+    partner_reach = {t for u in partner_units for t in reach(u)}
+    my_reach = {t for u in my_units for t in reach(u)}
     garrisoned = {u.territory for u in my_units}
 
     value = 0.0
@@ -338,7 +338,7 @@ def hostile_world(state: GameState, me: Player) -> List[Order]:
     for u in state.units:
         if u.player == me:
             continue
-        target = next((a for a in get_adjacent(u.territory) if a in mine), None)
+        target = next((a for a in reach(u) if a in mine), None)
         orders.append(Order(
             player=u.player, unit_territory=u.territory,
             order_type=OrderType.MOVE if target else OrderType.HOLD, target=target))

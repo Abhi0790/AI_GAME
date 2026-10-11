@@ -297,3 +297,20 @@ def test_inspector_shows_second_order_beliefs_candour_and_the_last_solve():
     assert last is not None and last["exploitability"] >= 0
     assert abs(sum(m["p"] for m in last["mixed"]) - 1) < 0.01
     assert sum(m["played"] for m in last["mixed"]) == 1
+
+
+def test_a_standard_game_sends_its_seas_names_and_fleets():
+    r = client.post("/api/game/new", json={**CONFIG, "map": "standard", "seating": None,
+                                          "node_budget": 100})
+    assert r.status_code == 200, r.text
+    board = r.json()["board"]
+    assert len(board["seas"]) == 19
+    assert board["seat_names"]["Red"] == "Austria"
+    units = client.get(f"/api/game/{r.json()['game_id']}/state").json()["state"]["units"]
+    assert sum(u["unit_type"] == "Fleet" for u in units) == 9
+
+
+def test_an_uneven_ring_is_accepted():
+    r = client.post("/api/game/new", json={**CONFIG, "homes_per_player": [3, 2, 2, 2]})
+    assert r.status_code == 200, r.text
+    assert len(r.json()["board"]["seas"]) == 0

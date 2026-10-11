@@ -232,6 +232,19 @@ def win_rates(game_results: List[Dict[Player, int]],
     return {p: wins[p] / total for p in seats}
 
 
+def seat_adjusted_centres(game_results: List[Dict[Player, int]],
+                          all_personas: List[Dict[Player, str]]) -> Dict[str, List[float]]:
+    """Persona -> final centres minus that seat's mean over all games, one
+    entry per seat played, so a strong seat does not look like a strong persona."""
+    seat_mean = {p: sum(g[p] for g in game_results) / len(game_results)
+                 for p in game_results[0]} if game_results else {}
+    out: Dict[str, List[float]] = defaultdict(list)
+    for scores, personas in zip(game_results, all_personas):
+        for p, centres in scores.items():
+            out[personas[p]].append(centres - seat_mean[p])
+    return dict(out)
+
+
 # ── Persona-keyed metrics (take GameRunner.personas()) ───────────────────
 
 def betrayal_rate_per_persona(history: list, personas: Dict[Player, str]
